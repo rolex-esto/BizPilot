@@ -33,6 +33,8 @@ import {
   Volume2,
   VolumeX,
   Bell,
+  ChevronDown,
+  ChevronUp,
 } from "lucide-react";
 import { ModuleIntroModal, AboutPageButton, useModuleIntro, ModuleIntroConfig } from "@/components/ModuleIntroModal";
 
@@ -148,9 +150,11 @@ export default function UnifiedInboxPage() {
   const [dismissedSuggestions, setDismissedSuggestions] = useState<Record<string, boolean>>({});
   const [aiApprovalSending, setAiApprovalSending] = useState(false);
   const [handlingToggleLoading, setHandlingToggleLoading] = useState(false);
+  const [aiSuggestionMinimized, setAiSuggestionMinimized] = useState(false);
 
   // Real-time Sound & Pop-up Notification State
   const [soundEnabled, setSoundEnabled] = useState(true);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
   const [activeToast, setActiveToast] = useState<{
     id: string;
     name: string;
@@ -413,6 +417,11 @@ export default function UnifiedInboxPage() {
       return () => clearInterval(chatInterval);
     }
   }, [activeConvId]);
+
+  // Smooth auto-scroll to bottom whenever new messages arrive
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [activeConv?.messages?.length, activeConvId, aiSuggestionMinimized]);
 
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -898,9 +907,11 @@ export default function UnifiedInboxPage() {
                     </div>
                   );
                 })}
+                {/* Auto-scroll anchor to guarantee newest message is always in full view */}
+                <div ref={messagesEndRef} />
               </div>
 
-              {/* Grounded AI Suggestion Card (Safe Approval Mode) */}
+              {/* Grounded AI Suggestion Card (Safe Approval Mode - Collapsible & Non-Intrusive) */}
               {(() => {
                 const lastInbound = activeConv.messages
                   ? [...activeConv.messages].reverse().find((m) => m.direction === "INBOUND" && m.aiSuggestedReply)
@@ -909,8 +920,43 @@ export default function UnifiedInboxPage() {
 
                 if (!suggestion) return null;
 
+                if (aiSuggestionMinimized) {
+                  return (
+                    <div className="px-3 py-2 bg-gradient-to-r from-purple-50 to-indigo-50 border-t border-purple-200 flex items-center justify-between gap-2 shadow-2xs">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <div className="flex items-center justify-center w-6 h-6 rounded-lg bg-purple-600 text-white shrink-0 shadow-2xs">
+                          <Bot className="w-3.5 h-3.5" />
+                        </div>
+                        <div className="flex items-center gap-1.5 truncate">
+                          <span className="text-[11px] font-bold text-purple-950 shrink-0">AI Reply Ready:</span>
+                          <span className="text-[11px] text-slate-600 truncate italic">"{suggestion}"</span>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => setAiSuggestionMinimized(false)}
+                          className="inline-flex items-center gap-1 px-2 py-0.5 bg-white hover:bg-slate-100 text-purple-900 border border-purple-200 rounded-md text-[11px] font-bold shadow-2xs transition-colors"
+                        >
+                          <ChevronUp className="w-3 h-3 text-purple-600" />
+                          View
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleApproveSuggestion(suggestion)}
+                          disabled={aiApprovalSending}
+                          className="inline-flex items-center gap-1 px-2.5 py-0.5 bg-purple-600 hover:bg-purple-700 text-white rounded-md text-[11px] font-bold shadow-2xs transition-colors disabled:opacity-50"
+                        >
+                          <Send className="w-2.5 h-2.5" />
+                          {aiApprovalSending ? "Sending..." : "Approve"}
+                        </button>
+                      </div>
+                    </div>
+                  );
+                }
+
                 return (
-                  <div className="p-3 bg-gradient-to-r from-purple-50 via-indigo-50 to-sky-50 border-t border-b border-purple-200 space-y-2">
+                  <div className="p-2.5 bg-gradient-to-r from-purple-50 via-indigo-50 to-sky-50 border-t border-purple-200 space-y-1.5 shadow-2xs transition-all animate-in fade-in duration-200">
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-1.5">
                         <Bot className="w-4 h-4 text-purple-600" />
@@ -918,31 +964,47 @@ export default function UnifiedInboxPage() {
                           Grounded AI Suggestion (Safe Approval Mode)
                         </span>
                       </div>
-                      <button
-                        onClick={handleDismissSuggestion}
-                        className="text-slate-400 hover:text-slate-600 p-0.5 rounded"
-                        title="Dismiss suggestion"
-                      >
-                        <X className="w-3.5 h-3.5" />
-                      </button>
+                      <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={() => setAiSuggestionMinimized(true)}
+                          className="text-slate-500 hover:text-slate-800 p-1 rounded hover:bg-purple-100/60 transition-colors flex items-center gap-1 text-[11px] font-medium"
+                          title="Minimize AI card"
+                        >
+                          <ChevronDown className="w-3.5 h-3.5" />
+                          <span className="hidden sm:inline">Minimize</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleDismissSuggestion}
+                          className="text-slate-400 hover:text-slate-700 p-1 rounded hover:bg-purple-100/60 transition-colors"
+                          title="Dismiss suggestion"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
                     </div>
 
-                    <p className="text-xs text-slate-800 bg-white/80 p-2.5 rounded-xl border border-purple-100 leading-relaxed shadow-2xs font-medium">
-                      {suggestion}
-                    </p>
+                    <div className="max-h-24 overflow-y-auto pr-1">
+                      <p className="text-xs text-slate-800 bg-white/90 p-2 rounded-lg border border-purple-100 leading-relaxed shadow-2xs font-medium">
+                        {suggestion}
+                      </p>
+                    </div>
 
-                    <div className="flex items-center justify-end gap-2 pt-1">
+                    <div className="flex items-center justify-end gap-2 pt-0.5">
                       <button
+                        type="button"
                         onClick={() => handleEditSuggestion(suggestion)}
-                        className="inline-flex items-center gap-1 px-2.5 py-1 bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 rounded-lg text-xs font-bold transition-colors shadow-2xs"
+                        className="inline-flex items-center gap-1 px-2 py-1 bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 rounded-lg text-[11px] font-bold transition-colors shadow-2xs"
                       >
                         <Edit2 className="w-3 h-3 text-slate-500" />
                         Edit in Composer
                       </button>
                       <button
+                        type="button"
                         onClick={() => handleApproveSuggestion(suggestion)}
                         disabled={aiApprovalSending}
-                        className="inline-flex items-center gap-1.5 px-3 py-1 bg-purple-600 hover:bg-purple-700 text-white rounded-lg text-xs font-bold transition-colors shadow-sm disabled:opacity-50"
+                        className="inline-flex items-center gap-1.5 px-3 py-1 bg-purple-600 hover:bg-purple-700 text-white rounded-lg text-[11px] font-bold transition-colors shadow-sm disabled:opacity-50"
                       >
                         <Send className="w-3 h-3" />
                         {aiApprovalSending ? "Sending..." : "Approve & Send"}
