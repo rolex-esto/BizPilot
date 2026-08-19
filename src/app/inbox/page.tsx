@@ -259,11 +259,25 @@ export default function UnifiedInboxPage() {
   useEffect(() => {
     fetchConversations();
     fetchProducts();
+
+    // Auto-poll conversations every 3 seconds for real-time incoming messages
+    const convInterval = setInterval(() => {
+      fetchConversations();
+    }, 3000);
+
+    return () => clearInterval(convInterval);
   }, [inboxMode, platformFilter, leadFilter]);
 
   useEffect(() => {
     if (activeConvId) {
       fetchActiveConversation(activeConvId);
+
+      // Auto-poll the active chat thread every 2.5 seconds for instant real-time message stream
+      const chatInterval = setInterval(() => {
+        fetchActiveConversation(activeConvId);
+      }, 2500);
+
+      return () => clearInterval(chatInterval);
     }
   }, [activeConvId]);
 
