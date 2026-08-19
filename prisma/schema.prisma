@@ -1,0 +1,545 @@
+// Prisma Schema for MSME Business Operations Copilot
+// Designed for SQLite in local MVP and seamless migration to PostgreSQL
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = "file:./dev.db"
+}
+
+model Business {
+  id                  String               @id @default(cuid())
+  name                String
+  ownerName           String
+  currency            String               @default("PHP")
+  timezone            String               @default("Asia/Manila")
+  contactNumber       String?
+  email               String?
+  address             String?
+  trialEndsAt         DateTime?
+  subscriptionStatus  String               @default("TRIAL") // TRIAL, ACTIVE, EXPIRED, CANCELLED, LIFETIME
+  isLifetimeFree      Boolean              @default(false)
+  planTier            String               @default("STARTER") // STARTER, BUSINESS, PRO
+  settingsJson        String               @default("{}")
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+
+  platformConnections PlatformConnection[]
+  calendarConnections CalendarConnection[]
+  calendarEvents      CalendarEvent[]
+  customers           Customer[]
+  conversations       Conversation[]
+  products            Product[]
+  leads               Lead[]
+  orders              Order[]
+  payments            Payment[]
+  aiInsights          AiInsight[]
+  auditLogs           AuditLog[]
+  categories          Category[]
+  supportSessions     SupportSession[]
+}
+
+model PlatformConnection {
+  id                   String    @id @default(cuid())
+  businessId           String
+  platform             String    // FACEBOOK, INSTAGRAM, WHATSAPP, TIKTOK
+  platformAccountId    String    // Page ID, WABA ID, TikTok Open ID
+  platformAccountName  String
+  accessTokenEncrypted String?
+  webhookVerifyToken   String?
+  status               String    @default("CONNECTED") // CONNECTED, DISCONNECTED, NEEDS_REAUTH, PENDING_APPROVAL
+  statusMessage        String?
+  capabilitiesJson     String    @default("{}")
+  lastSyncAt           DateTime?
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+
+  business             Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@unique([businessId, platform, platformAccountId])
+  @@index([businessId, platform])
+}
+
+model Customer {
+  id                   String                 @id @default(cuid())
+  businessId           String
+  environment          String                 @default("LIVE") // LIVE, PRACTICE
+  primaryPlatform      String                 // FACEBOOK, INSTAGRAM, WHATSAPP, TIKTOK, MANUAL, WALK_IN, PHONE
+  source               String                 @default("ONLINE") // WALK_IN, REFERRAL, PHONE, FACEBOOK, INSTAGRAM, WHATSAPP, TIKTOK, MANUAL, OTHER
+  externalId           String?                // Platform PSID/User ID
+  name                 String
+  handle               String?
+  avatarUrl            String?
+  email                String?
+  phone                String?
+  deliveryAddress      String?
+  preferredFulfillment String?                // MEETUP, LBC, PICKUP, COURIER, DELIVERY
+  leadScore            Int                    @default(50) // 0 - 100
+  leadStatus           String                 @default("WARM") // HOT, WARM, COLD, CONVERTED, LOST
+  lifetimeValue        Float                  @default(0.0)
+  orderCount           Int                    @default(0)
+  notes                String?
+  tags                 String?                // Comma-separated or JSON
+  createdAt            DateTime               @default(now())
+  updatedAt            DateTime               @updatedAt
+
+  business             Business               @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  conversations        Conversation[]
+  messages             Message[]
+  leads                Lead[]
+  orders               Order[]
+  payments             Payment[]
+  calendarEvents       CalendarEvent[]
+  identityLinks        CustomerIdentityLink[]
+
+  @@index([businessId, environment])
+  @@index([businessId, primaryPlatform])
+  @@index([businessId, externalId])
+  @@index([businessId, leadStatus])
+}
+
+model CustomerIdentityLink {
+  id           String    @id @default(cuid())
+  customerId   String
+  platform     String    // FACEBOOK, INSTAGRAM, WHATSAPP, TIKTOK
+  externalId   String
+  externalName String?
+  handle       String?
+  linkedAt     DateTime  @default(now())
+
+  customer     Customer  @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@unique([platform, externalId])
+  @@index([customerId])
+}
+
+model Conversation {
+  id                 String    @id @default(cuid())
+  businessId         String
+  customerId         String
+  environment        String    @default("LIVE") // LIVE, PRACTICE
+  sourceType         String    @default("FACEBOOK") // FACEBOOK, INSTAGRAM, WHATSAPP, TIKTOK, SIMULATOR, MANUAL
+  platform           String    // FACEBOOK, INSTAGRAM, WHATSAPP, TIKTOK, MANUAL
+  externalThreadId   String?
+  status             String    @default("ACTIVE") // ACTIVE, PENDING_FOLLOWUP, RESOLVED, ARCHIVED
+  unreadCount        Int       @default(0)
+  lastMessageAt      DateTime  @default(now())
+  lastMessagePreview String?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  business           Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  customer           Customer  @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  messages           Message[]
+  leads              Lead[]
+  orders             Order[]
+
+  @@index([businessId, environment])
+  @@index([businessId, environment, platform])
+  @@index([businessId, platform])
+  @@index([businessId, status])
+  @@index([customerId])
+}
+
+model Message {
+  id                 String       @id @default(cuid())
+  conversationId     String
+  customerId         String?
+  environment        String       @default("LIVE") // LIVE, PRACTICE
+  sourceType         String       @default("FACEBOOK") // FACEBOOK, INSTAGRAM, WHATSAPP, TIKTOK, SIMULATOR, MANUAL
+  platform           String       // FACEBOOK, INSTAGRAM, WHATSAPP, TIKTOK, MANUAL
+  externalMessageId  String?      @unique // Idempotency check key
+  direction          String       // INBOUND, OUTBOUND
+  textContent        String
+  mediaUrl           String?
+  mediaType          String?      // IMAGE, AUDIO, DOCUMENT, VIDEO
+  rawPayload         String?      // Raw Webhook payload for audit/debugging
+  aiClassification   String?      // PRODUCT_INQUIRY, PRICE_INQUIRY, AVAILABILITY_INQUIRY, PURCHASE_INTENT, PAYMENT_PROOF, DELIVERY_INQUIRY, COMPLAINT, GENERAL_QUESTION
+  aiConfidence       Float?       // 0.0 - 1.0
+  aiSuggestedReply   String?
+  isRead             Boolean      @default(false)
+  sentAt             DateTime     @default(now())
+  createdAt          DateTime     @default(now())
+
+  conversation       Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  customer           Customer?    @relation(fields: [customerId], references: [id], onDelete: SetNull)
+
+  @@index([conversationId, environment])
+  @@index([conversationId, sentAt])
+  @@index([platform, externalMessageId])
+}
+
+model Product {
+  id                   String      @id @default(cuid())
+  businessId           String
+  sku                  String
+  name                 String
+  description          String?
+  category             String      @default("General")
+  price                Float       // Unit Price in PHP (Immutable Catalog Base)
+  costPrice            Float?      // Cost Price in PHP
+  stockQuantity        Int         @default(0)
+  safetyStockThreshold Int         @default(5)
+  imageUrl             String?
+  isActive             Boolean     @default(true)
+  createdAt            DateTime    @default(now())
+  updatedAt            DateTime    @updatedAt
+
+  business             Business    @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  orderItems           OrderItem[]
+  leads                Lead[]
+
+  @@unique([businessId, sku])
+  @@index([businessId, category])
+  @@index([businessId, stockQuantity])
+}
+
+model Category {
+  id          String   @id @default(cuid())
+  businessId  String
+  name        String
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  business    Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@unique([businessId, name])
+  @@index([businessId])
+}
+
+model Lead {
+  id                     String       @id @default(cuid())
+  businessId             String
+  customerId             String
+  environment            String       @default("LIVE") // LIVE, PRACTICE
+  conversationId         String?
+  interestedProductId    String?
+  detectedIntent         String       // PRODUCT_INQUIRY, PRICE_INQUIRY, AVAILABILITY_INQUIRY, PURCHASE_INTENT, PAYMENT_PROOF, DELIVERY_INQUIRY, COMPLAINT, GENERAL_QUESTION
+  intentScore            Int          @default(50) // 0 - 100
+  estimatedValue         Float?
+  status                 String       @default("NEW") // NEW, INTERESTED, NEGOTIATING, WAITING_FOR_CUSTOMER, AGREED, CONVERTED, LOST
+  originalPrice          Float?
+  offeredPrice           Float?       // Latest customer offer
+  counterPrice           Float?       // Latest owner counter-offer
+  agreedPrice            Float?       // Final accepted negotiated price
+  negotiationNotes       String?
+  negotiationHistoryJson String?      // Array of [{ timestamp, party: "CUSTOMER"|"OWNER", amount: number, note?: string }]
+  notes                  String?
+  createdAt              DateTime     @default(now())
+  updatedAt              DateTime     @updatedAt
+
+  business               Business     @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  customer               Customer     @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  conversation           Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  interestedProduct      Product?     @relation(fields: [interestedProductId], references: [id], onDelete: SetNull)
+  calendarEvents         CalendarEvent[]
+
+  @@index([businessId, environment])
+  @@index([businessId, status])
+  @@index([customerId])
+}
+
+model Order {
+  id                String       @id @default(cuid())
+  businessId        String
+  customerId        String
+  environment       String       @default("LIVE") // LIVE, PRACTICE
+  conversationId    String?
+  orderNumber       String       @unique // E.g. ORD-2026-001
+  totalAmount       Float        // Final Agreed Total in PHP
+  originalAmount    Float?       // Catalog subtotal before discounts
+  discountAmount    Float        @default(0.0) // Total discount granted
+  source            String       @default("ONLINE") // WALK_IN, PHONE, REFERRAL, FACEBOOK, INSTAGRAM, WHATSAPP, TIKTOK, MANUAL
+  fulfillmentMethod String       @default("DELIVERY") // MEETUP, LBC, COURIER, PICKUP, DELIVERY, OTHER
+  status            String       @default("PENDING") // PENDING, CONFIRMED, PACKED, SHIPPED, DELIVERED, CANCELLED
+  deliveryAddress   String?
+  customerPhone     String?
+  courier           String?      // Lalamove, J&T Express, Flash Express, Grab, LBC
+  trackingNumber    String?      // Manual tracking reference number
+  courierTracking   String?      // Manual LBC tracking reference
+  shippingFee       Float        @default(0.0)
+  
+  // Physical Meetup Details
+  meetupSchedule    DateTime?
+  meetupLocation    String?
+  meetupStatus      String?      // SCHEDULED, COMPLETED, CANCELLED
+  
+  // Store Pickup Details
+  pickupSchedule    DateTime?
+  pickupLocation    String?
+  pickupStatus      String?      // READY_FOR_PICKUP, PICKED_UP
+  
+  notes             String?
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+
+  business          Business     @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  customer          Customer     @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  conversation      Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  items             OrderItem[]
+  payments          Payment[]
+  calendarEvents    CalendarEvent[]
+
+  @@index([businessId, environment])
+  @@index([businessId, status])
+  @@index([businessId, fulfillmentMethod])
+  @@index([customerId])
+}
+
+model OrderItem {
+  id                String   @id @default(cuid())
+  orderId           String
+  productId         String
+  productName       String
+  productSku        String
+  originalUnitPrice Float?   // Catalog price at time of order
+  discount          Float    @default(0.0) // Discount per unit
+  unitPrice         Float    // Final negotiated unit price
+  quantity          Int
+  subtotal          Float    // unitPrice * quantity
+
+  order             Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  product           Product  @relation(fields: [productId], references: [id], onDelete: Restrict)
+
+  @@index([orderId])
+  @@index([productId])
+}
+
+model Payment {
+  id              String    @id @default(cuid())
+  businessId      String
+  orderId         String
+  customerId      String
+  environment     String    @default("LIVE") // LIVE, PRACTICE
+  paymentMethod   String    @default("GCASH") // GCASH, MAYA, BANK_TRANSFER, COD
+  amount          Float
+  referenceNumber String?
+  proofImageUrl   String?
+  status          String    @default("UNPAID") // UNPAID, PENDING_VERIFICATION, PAID, FAILED
+  verifiedAt      DateTime?
+  notes           String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  business        Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  order           Order     @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  customer        Customer  @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@index([businessId, environment])
+  @@index([businessId, status])
+  @@index([orderId])
+  @@index([customerId])
+}
+
+model AiInsight {
+  id            String    @id @default(cuid())
+  businessId    String
+  type          String    // LEAD_URGENT, LOW_STOCK, UNPAID_ORDER, SALES_TREND, FOLLOWUP_OVERDUE
+  title         String
+  narrative     String
+  actionType    String?   // NOTIFY_CUSTOMER, RESTOCK_PRODUCT, CONFIRM_PAYMENT, VIEW_ORDER
+  actionPayload String?   // JSON data for quick action execution
+  priority      String    @default("MEDIUM") // CRITICAL, HIGH, MEDIUM, LOW
+  isResolved    Boolean   @default(false)
+  resolvedAt    DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  business      Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@index([businessId, isResolved, priority])
+}
+
+model AuditLog {
+  id          String    @id @default(cuid())
+  businessId  String?
+  action      String    // E.g. ORDER_CREATED, PAYMENT_VERIFIED, MESSAGE_SENT, PRODUCT_RESTOCKED
+  entityType  String    // Order, Payment, Message, Product, Customer
+  entityId    String?
+  details     String?
+  performedBy String    @default("OWNER") // OWNER, SYSTEM_AI, WEBHOOK, ADMIN, SYSTEM
+  createdAt   DateTime  @default(now())
+
+  business    Business? @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@index([businessId, createdAt])
+}
+
+model CalendarConnection {
+  id                    String    @id @default(cuid())
+  businessId            String
+  provider              String    // GOOGLE, OUTLOOK
+  accountEmail          String
+  accountName           String?
+  accessTokenEncrypted  String?
+  refreshTokenEncrypted String?
+  tokenExpiresAt        DateTime?
+  status                String    @default("CONNECTED") // CONNECTED, NOT_CONNECTED, NEEDS_REAUTH
+  calendarId            String?   @default("primary")
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  business              Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@unique([businessId, provider])
+  @@index([businessId])
+}
+
+model CalendarEvent {
+  id               String    @id @default(cuid())
+  businessId       String
+  customerId       String?
+  orderId          String?
+  leadId           String?
+  title            String
+  description      String?
+  eventType        String    // CUSTOMER_MEETUP, STORE_PICKUP, DELIVERY, FOLLOW_UP, PAYMENT_COLLECTION, LBC_SHIPMENT, NEGOTIATION_FOLLOW_UP, OTHER
+  startAt          DateTime
+  endAt            DateTime?
+  location         String?
+  status           String    @default("SCHEDULED") // SCHEDULED, COMPLETED, CANCELLED
+  reminderMinutes  Int       @default(30)
+  calendarProvider String?   // GOOGLE, OUTLOOK, INTERNAL
+  externalEventId  String?   // External provider event ID for sync & idempotency
+  sourceType       String?   // ORDER, LEAD, CUSTOMER, MANUAL
+  sourceId         String?   // Linked entity ID preventing duplicate sync
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  business         Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  customer         Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  order            Order?    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  lead             Lead?     @relation(fields: [leadId], references: [id], onDelete: SetNull)
+
+  @@index([businessId, startAt])
+  @@index([businessId, eventType, status])
+  @@index([businessId, sourceType, sourceId])
+}
+
+model User {
+  id                    String    @id @default(cuid())
+  email                 String    @unique
+  passwordHash          String
+  name                  String
+  role                  String    @default("OWNER") // ADMIN, OWNER
+  businessId            String?
+  emailVerified         Boolean   @default(true)
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  sessions     Session[]
+}
+
+/// Temporary storage for signups awaiting email verification.
+/// Records here are NOT real users — they only become users after verification.
+/// Automatically expire after 24 hours.
+model PendingSignup {
+  id                String   @id @default(cuid())
+  email             String   @unique
+  passwordHash      String
+  name              String
+  storeName         String
+  contactNumber     String?
+  address           String?
+  verificationToken String   @unique
+  expiresAt         DateTime
+  createdAt         DateTime @default(now())
+}
+
+model Session {
+  id           String    @id @default(cuid())
+  userId       String
+  token        String    @unique
+  expiresAt    DateTime
+  createdAt    DateTime  @default(now())
+
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([token])
+  @@index([userId])
+}
+
+/// Temporary storage for password reset tokens.
+/// Single-use, expires in 1 hour.
+model PasswordResetToken {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  token     String   @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([token])
+  @@index([email])
+}
+
+model SupportSession {
+  id              String    @id @default(cuid())
+  adminId         String
+  businessId      String
+  reason          String
+  scope           String    @default("ORDERS") // ORDERS, PRODUCTS, FULFILLMENT, GENERAL_TROUBLESHOOTING
+  durationMinutes Int       @default(30)
+  status          String    @default("ACTIVE") // ACTIVE, EXPIRED, REVOKED
+  startedAt       DateTime  @default(now())
+  expiresAt       DateTime
+  revokedAt       DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  business        Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@index([businessId, status])
+  @@index([adminId, status])
+  @@index([expiresAt])
+}
+
+model AdminApprovalRequest {
+  id              String    @id @default(cuid())
+  adminId         String
+  actionType      String    // GRANT_ADMIN, GRANT_LIFETIME
+  targetEmail     String
+  targetId        String?
+  targetName      String?
+  metadataJson    String?
+  otpHash         String
+  salt            String
+  attempts        Int       @default(0)
+  maxAttempts     Int       @default(5)
+  status          String    @default("PENDING") // PENDING, VERIFIED, CONSUMED, INVALIDATED, EXPIRED
+  expiresAt       DateTime
+  lastSentAt      DateTime  @default(now())
+  verifiedAt      DateTime?
+  consumedAt      DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@index([adminId, status])
+  @@index([targetEmail, actionType])
+}
+
+model EmailChangeRequest {
+  id                     String    @id @default(cuid())
+  userId                 String
+  currentEmail           String
+  newEmail               String?
+  currentEmailVerifiedAt DateTime?
+  newEmailVerifiedAt     DateTime?
+  currentOtpHash         String?
+  currentOtpSalt         String?
+  currentAttempts        Int       @default(0)
+  newOtpHash             String?
+  newOtpSalt             String?
+  newAttempts            Int       @default(0)
+  maxAttempts            Int       @default(5)
+  expiresAt              DateTime
+  lastSentAt             DateTime  @default(now())
+  status                 String    @default("PENDING_CURRENT") // PENDING_CURRENT, CURRENT_VERIFIED, PENDING_NEW, COMPLETED, INVALIDATED, EXPIRED
+  createdAt              DateTime  @default(now())
+  updatedAt              DateTime  @updatedAt
+
+  @@index([userId, status])
+}
