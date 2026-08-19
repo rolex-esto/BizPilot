@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import Link from "next/link";
 import {
   MessageSquare,
@@ -30,6 +30,9 @@ import {
   Sliders,
   Radio,
   Terminal,
+  Volume2,
+  VolumeX,
+  Bell,
 } from "lucide-react";
 import { ModuleIntroModal, AboutPageButton, useModuleIntro, ModuleIntroConfig } from "@/components/ModuleIntroModal";
 
@@ -146,6 +149,79 @@ export default function UnifiedInboxPage() {
   const [aiApprovalSending, setAiApprovalSending] = useState(false);
   const [handlingToggleLoading, setHandlingToggleLoading] = useState(false);
 
+  // Real-time Sound & Pop-up Notification State
+  const [soundEnabled, setSoundEnabled] = useState(true);
+  const [activeToast, setActiveToast] = useState<{
+    id: string;
+    name: string;
+    platform: string;
+    preview: string;
+    convId: string;
+  } | null>(null);
+
+  const knownTimestampsRef = useRef<Record<string, number>>({});
+  const initialLoadDoneRef = useRef(false);
+  const lastActiveMsgCountRef = useRef<Record<string, number>>({});
+
+  // High-fidelity Web Audio API chime pop
+  const playNotificationChime = () => {
+    if (!soundEnabled) return;
+    try {
+      const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      if (!AudioCtx) return;
+      const ctx = new AudioCtx();
+      if (ctx.state === "suspended") {
+        ctx.resume();
+      }
+
+      const now = ctx.currentTime;
+
+      // Note 1: Bright bell (587.33Hz D5 -> 880Hz A5)
+      const osc1 = ctx.createOscillator();
+      const gain1 = ctx.createGain();
+      osc1.type = "sine";
+      osc1.frequency.setValueAtTime(587.33, now);
+      osc1.frequency.exponentialRampToValueAtTime(880, now + 0.08);
+
+      gain1.gain.setValueAtTime(0, now);
+      gain1.gain.linearRampToValueAtTime(0.3, now + 0.02);
+      gain1.gain.exponentialRampToValueAtTime(0.001, now + 0.35);
+
+      osc1.connect(gain1);
+      gain1.connect(ctx.destination);
+
+      // Note 2: Warm harmonic pop (880Hz A5 -> 1174.66Hz D6)
+      const osc2 = ctx.createOscillator();
+      const gain2 = ctx.createGain();
+      osc2.type = "triangle";
+      osc2.frequency.setValueAtTime(880, now + 0.08);
+      osc2.frequency.exponentialRampToValueAtTime(1174.66, now + 0.2);
+
+      gain2.gain.setValueAtTime(0, now + 0.08);
+      gain2.gain.linearRampToValueAtTime(0.22, now + 0.1);
+      gain2.gain.exponentialRampToValueAtTime(0.001, now + 0.42);
+
+      osc2.connect(gain2);
+      gain2.connect(ctx.destination);
+
+      osc1.start(now);
+      osc1.stop(now + 0.36);
+      osc2.start(now + 0.08);
+      osc2.stop(now + 0.43);
+    } catch {
+      // AudioContext blocked or not supported - fails safely
+    }
+  };
+
+  // Auto-dismiss toast notification after 6 seconds
+  useEffect(() => {
+    if (!activeToast) return;
+    const timer = setTimeout(() => {
+      setActiveToast(null);
+    }, 6000);
+    return () => clearTimeout(timer);
+  }, [activeToast]);
+
   const formatPhp = (amt: number) =>
     `₱${amt.toLocaleString("en-PH", { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
 
@@ -154,9 +230,49 @@ export default function UnifiedInboxPage() {
       const res = await fetch(`/api/conversations?environment=${inboxMode}&platform=${platformFilter}&leadStatus=${leadFilter}`);
       const data = await res.json();
       if (data.status === "success") {
-        setConversations(data.conversations);
-        if (!activeConvId && data.conversations.length > 0) {
-          setActiveConvId(data.conversations[0].id);
+        const convList = data.conversations as Conversation[];
+        setConversations(convList);
+        if (!activeConvId && convList.length > 0) {
+          setActiveConvId(convList[0].id);
+        }
+
+        // Check for new inbound customer message
+        let hasNewInbound = false;
+        let incomingToast: {
+          id: string;
+          name: string;
+          platform: string;
+          preview: string;
+          convId: string;
+        } | null = null;
+
+        convList.forEach((conv) => {
+          const lastTime = new Date(conv.lastMessageAt).getTime();
+          const prevTime = knownTimestampsRef.current[conv.id];
+
+          if (initialLoadDoneRef.current && prevTime !== undefined && lastTime > prevTime) {
+            hasNewInbound = true;
+            incomingToast = {
+              id: conv.id,
+              name: conv.customer?.name || "Customer",
+              platform: conv.platform,
+              preview: conv.lastMessagePreview || "Sent a new message",
+              convId: conv.id,
+            };
+          }
+          knownTimestampsRef.current[conv.id] = lastTime;
+        });
+
+        if (!initialLoadDoneRef.current) {
+          initialLoadDoneRef.current = true;
+        } else if (hasNewInbound) {
+          playNotificationChime();
+          if (incomingToast) {
+            setActiveToast(incomingToast);
+          }
+          if (typeof document !== "undefined") {
+            document.title = "🔔 (1) New Message - BizPilot";
+          }
         }
       }
     } catch (err) {
@@ -187,9 +303,21 @@ export default function UnifiedInboxPage() {
       const res = await fetch(`/api/conversations/${id}`);
       const data = await res.json();
       if (data.status === "success") {
-        setActiveConv(data.conversation);
-        setOrderAddress(data.conversation.customer.deliveryAddress || "");
-        setOrderPhone(data.conversation.customer.phone || "");
+        const conv = data.conversation as Conversation;
+        setActiveConv(conv);
+        setOrderAddress(conv.customer.deliveryAddress || "");
+        setOrderPhone(conv.customer.phone || "");
+
+        const messages = conv.messages || [];
+        const msgCount = messages.length;
+        const prevCount = lastActiveMsgCountRef.current[id];
+        if (prevCount !== undefined && msgCount > prevCount) {
+          const lastMsg = messages[messages.length - 1];
+          if (lastMsg && lastMsg.direction === "INBOUND") {
+            playNotificationChime();
+          }
+        }
+        lastActiveMsgCountRef.current[id] = msgCount;
       }
     } catch (err) {
       console.error("Error fetching conversation details:", err);
@@ -271,6 +399,11 @@ export default function UnifiedInboxPage() {
   useEffect(() => {
     if (activeConvId) {
       fetchActiveConversation(activeConvId);
+
+      // Reset document title once conversation is active
+      if (typeof document !== "undefined") {
+        document.title = "BizPilot - Customer Messages";
+      }
 
       // Auto-poll the active chat thread every 2.5 seconds for instant real-time message stream
       const chatInterval = setInterval(() => {
@@ -480,6 +613,25 @@ export default function UnifiedInboxPage() {
             <option value="WARM">⚡ Warm Leads</option>
             <option value="CONVERTED">✅ Converted Buyers</option>
           </select>
+
+          {/* Notification Chime Sound Toggle */}
+          <button
+            type="button"
+            onClick={() => {
+              const next = !soundEnabled;
+              setSoundEnabled(next);
+              if (next) playNotificationChime();
+            }}
+            title={soundEnabled ? "Pop chime sound is ON (Click to mute)" : "Pop chime sound is MUTED (Click to unmute)"}
+            className={`px-2.5 py-1.5 rounded-lg border text-xs font-semibold flex items-center gap-1.5 transition-all ${
+              soundEnabled
+                ? "bg-sky-50 text-sky-700 border-sky-200 hover:bg-sky-100 shadow-2xs"
+                : "bg-slate-50 text-slate-400 border-slate-200 hover:bg-slate-100"
+            }`}
+          >
+            {soundEnabled ? <Volume2 className="w-3.5 h-3.5 text-sky-600 animate-pulse" /> : <VolumeX className="w-3.5 h-3.5 text-slate-400" />}
+            <span className="hidden sm:inline">{soundEnabled ? "Sound ON" : "Muted"}</span>
+          </button>
         </div>
       </div>
 
@@ -1158,6 +1310,62 @@ export default function UnifiedInboxPage() {
                 </div>
               </form>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* Floating Real-time Inbound Message Pop-up Toast */}
+      {activeToast && (
+        <div className="fixed bottom-6 right-6 z-50 max-w-sm w-full bg-slate-900/95 backdrop-blur-md text-white border border-slate-700/80 shadow-2xl rounded-2xl p-4 animate-in fade-in slide-in-from-bottom-5 duration-300">
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex items-center gap-2.5">
+              <div className="relative flex items-center justify-center w-9 h-9 rounded-xl bg-sky-500/20 border border-sky-400/40 text-sky-400 shrink-0">
+                <Bell className="w-5 h-5 animate-bounce" />
+                <span className="absolute -top-1 -right-1 flex h-3 w-3">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-sky-400 opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-3 w-3 bg-sky-500"></span>
+                </span>
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2">
+                  <h4 className="text-sm font-bold text-slate-100 truncate">{activeToast.name}</h4>
+                  <span className="text-[10px] font-semibold bg-sky-500/20 text-sky-300 px-1.5 py-0.5 rounded-md border border-sky-400/30 shrink-0">
+                    {activeToast.platform}
+                  </span>
+                </div>
+                <p className="text-xs text-slate-300 line-clamp-1 mt-0.5">
+                  {activeToast.preview}
+                </p>
+              </div>
+            </div>
+            <button
+              onClick={() => setActiveToast(null)}
+              className="text-slate-400 hover:text-white p-1 rounded-lg transition-colors shrink-0"
+              title="Close notification"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+          <div className="mt-3 flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
+            <button
+              onClick={() => setActiveToast(null)}
+              className="px-2.5 py-1 text-xs text-slate-400 hover:text-slate-200 transition-colors"
+            >
+              Dismiss
+            </button>
+            <button
+              onClick={() => {
+                setActiveConvId(activeToast.convId);
+                setActiveToast(null);
+                if (typeof document !== "undefined") {
+                  document.title = "BizPilot - Customer Messages";
+                }
+              }}
+              className="px-3 py-1 bg-sky-500 hover:bg-sky-400 text-white text-xs font-bold rounded-lg shadow-sm transition-colors flex items-center gap-1.5"
+            >
+              <MessageSquare className="w-3.5 h-3.5" />
+              Open Chat
+            </button>
           </div>
         </div>
       )}
