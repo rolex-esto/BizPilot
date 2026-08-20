@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useRef, useMemo } from "react";
+import React, { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import Link from "next/link";
 import {
   MessageSquare,
@@ -105,6 +105,7 @@ interface Message {
   aiSuggestedReply?: string;
   sentAt: string;
   rawPayload?: string | null;
+  status?: "PENDING" | "SENDING" | "SENT" | "FAILED";
 }
 
 interface Conversation {
@@ -210,12 +211,15 @@ export default function UnifiedInboxPage() {
     convId: string;
   } | null>(null);
 
-  // Polling & Caching Refs
+  // ─── Polling & Caching Refs ──────────────────────────────────────────────────
   const knownTimestampsRef = useRef<Record<string, number>>({});
   const initialLoadDoneRef = useRef(false);
   const lastActiveMsgCountRef = useRef<Record<string, number>>({});
   const convMessagesCacheRef = useRef<Map<string, Message[]>>(new Map());
 
+  // Dedicated Active Thread Delta Cursor
+  const lastKnownActiveMsgTimestampRef = useRef<string | null>(null);
+  const isFetchingActiveThreadRef = useRef(false);
   const isFetchingConvsRef = useRef(false);
   const isAutoReconcilingRef = useRef(false);
   const activeConvRequestIdRef = useRef(0);
@@ -244,7 +248,7 @@ export default function UnifiedInboxPage() {
   }, [showAttachMenu]);
 
   // Web Audio API Pop Chime
-  const playNotificationChime = () => {
+  const playNotificationChime = useCallback(() => {
     if (!soundEnabled) return;
     try {
       const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
@@ -291,7 +295,7 @@ export default function UnifiedInboxPage() {
     } catch {
       // AudioContext blocked or unsupported
     }
-  };
+  }, [soundEnabled]);
 
   // Auto-dismiss toast notification after 6 seconds
   useEffect(() => {
@@ -319,7 +323,12 @@ export default function UnifiedInboxPage() {
       convFetchAbortRef.current.abort();
       convFetchAbortRef.current = null;
     }
+    if (activeFetchAbortRef.current) {
+      activeFetchAbortRef.current.abort();
+      activeFetchAbortRef.current = null;
+    }
     isFetchingConvsRef.current = false;
+    isFetchingActiveThreadRef.current = false;
 
     setConversations([]);
     setActiveConvId(null);
@@ -328,6 +337,7 @@ export default function UnifiedInboxPage() {
     initialLoadDoneRef.current = false;
     lastActiveMsgCountRef.current = {};
     lastKnownServerTimestampRef.current = null;
+    lastKnownActiveMsgTimestampRef.current = null;
     convMessagesCacheRef.current.clear();
     cleanupPendingAttachment();
 
@@ -353,7 +363,7 @@ export default function UnifiedInboxPage() {
       if (data.status === "success") {
         fetchConversations(false);
         if (activeConvIdRef.current) {
-          fetchActiveConversation(activeConvIdRef.current);
+          fetchActiveConversation(activeConvIdRef.current, false);
         }
       }
     } catch (err) {
@@ -408,6 +418,7 @@ export default function UnifiedInboxPage() {
         }
 
         const freshConvs: Conversation[] = data.conversations || [];
+        let activeConvHasUpdates = false;
 
         // Check for new inbound messages
         if (initialLoadDoneRef.current) {
@@ -416,6 +427,10 @@ export default function UnifiedInboxPage() {
             const prevMs = knownTimestampsRef.current[conv.id];
 
             if (prevMs !== undefined && currentMs > prevMs) {
+              if (conv.id === activeConvIdRef.current) {
+                activeConvHasUpdates = true;
+              }
+
               const lastMsg = conv.messages && conv.messages[0];
               const isOutbound = lastMsg && lastMsg.direction === "OUTBOUND";
 
@@ -442,12 +457,17 @@ export default function UnifiedInboxPage() {
 
         setConversations(freshConvs);
 
-        // Pre-populate cache for latest messages
+        // Pre-populate cache
         freshConvs.forEach((conv) => {
           if (conv.messages && conv.messages.length > 0 && !convMessagesCacheRef.current.has(conv.id)) {
             convMessagesCacheRef.current.set(conv.id, conv.messages);
           }
         });
+
+        // Trigger immediate active thread delta sync if current conversation had updates
+        if (activeConvHasUpdates && activeConvIdRef.current) {
+          fetchActiveConversation(activeConvIdRef.current, true);
+        }
       }
     } catch (err: any) {
       if (err?.name === "AbortError") return;
@@ -477,54 +497,103 @@ export default function UnifiedInboxPage() {
     }
   };
 
-  // fetchActiveConversation
+  // ─── fetchActiveConversation (Full & Delta) ──────────────────────────────────
   const fetchActiveConversation = async (
     id: string,
-    forcedRequestId?: number,
-    startTimeMs?: number
+    isDelta = false,
+    forcedRequestId?: number
   ) => {
-    const requestId = forcedRequestId ?? ++activeConvRequestIdRef.current;
-    const start = startTimeMs ?? performance.now();
+    if (!id) return;
+    if (isFetchingActiveThreadRef.current && isDelta) return;
 
-    if (activeFetchAbortRef.current) {
-      activeFetchAbortRef.current.abort();
-      activeFetchAbortRef.current = null;
+    const requestId = forcedRequestId ?? (isDelta ? activeConvRequestIdRef.current : ++activeConvRequestIdRef.current);
+    isFetchingActiveThreadRef.current = true;
+
+    // For full fetches, abort previous in-flight request
+    if (!isDelta) {
+      if (activeFetchAbortRef.current) {
+        activeFetchAbortRef.current.abort();
+        activeFetchAbortRef.current = null;
+      }
     }
 
     const abortController = new AbortController();
-    activeFetchAbortRef.current = abortController;
+    if (!isDelta) {
+      activeFetchAbortRef.current = abortController;
+    }
 
     try {
-      const res = await fetch(`/api/conversations/${id}`, { signal: abortController.signal });
+      let url = `/api/conversations/${id}`;
+      const since = lastKnownActiveMsgTimestampRef.current;
+      if (isDelta && since) {
+        url += `?since=${encodeURIComponent(since)}&deltaOnly=true`;
+      }
+
+      const res = await fetch(url, { signal: abortController.signal });
 
       if (abortController.signal.aborted) return;
 
       const data = await res.json();
+
+      // Generation & Active Conv Guard
+      if (activeConvIdRef.current !== id) {
+        return;
+      }
+
+      if (!isDelta && requestId !== activeConvRequestIdRef.current) {
+        return;
+      }
+
       if (data.status === "success") {
-        const conv = data.conversation as Conversation;
+        if (isDelta) {
+          // Delta Update Mode
+          if (data.hasUpdates && data.newMessages && data.newMessages.length > 0) {
+            const incoming: Message[] = data.newMessages;
 
-        // Strict Generation Guard
-        if (requestId !== activeConvRequestIdRef.current || activeConvIdRef.current !== id) {
-          return;
-        }
+            setActiveConv((prev) => {
+              if (!prev || prev.id !== id) return prev;
+              const existing = prev.messages || [];
 
-        const messages = conv.messages || [];
-        // Update in-memory cache
-        convMessagesCacheRef.current.set(id, messages);
+              // Merge deduplicated by id, replacing any matching temp optimistic IDs
+              const existingMap = new Map<string, Message>();
+              existing.forEach((m) => existingMap.set(m.id, m));
 
-        setActiveConv(conv);
-        setOrderAddress(conv.customer?.deliveryAddress || "");
-        setOrderPhone(conv.customer?.phone || "");
+              incoming.forEach((msg) => {
+                existingMap.set(msg.id, msg);
+              });
 
-        const msgCount = messages.length;
-        const prevCount = lastActiveMsgCountRef.current[id];
-        if (prevCount !== undefined && msgCount > prevCount) {
-          const lastMsg = messages[messages.length - 1];
-          if (lastMsg && lastMsg.direction === "INBOUND") {
-            playNotificationChime();
+              // Filter out temp optimistic messages that have same textContent as recent incoming outbound message
+              const merged = Array.from(existingMap.values()).sort(
+                (a, b) => new Date(a.sentAt).getTime() - new Date(b.sentAt).getTime()
+              );
+
+              convMessagesCacheRef.current.set(id, merged);
+              return { ...prev, messages: merged, unreadCount: 0 };
+            });
+
+            const lastIncoming = incoming[incoming.length - 1];
+            if (lastIncoming?.sentAt) {
+              lastKnownActiveMsgTimestampRef.current = lastIncoming.sentAt;
+            }
+
+            if (incoming.some((m) => m.direction === "INBOUND")) {
+              playNotificationChime();
+            }
           }
+        } else {
+          // Full Load Mode
+          const conv = data.conversation as Conversation;
+          const messages = conv.messages || [];
+
+          convMessagesCacheRef.current.set(id, messages);
+          if (messages.length > 0) {
+            lastKnownActiveMsgTimestampRef.current = messages[messages.length - 1].sentAt;
+          }
+
+          setActiveConv(conv);
+          setOrderAddress(conv.customer?.deliveryAddress || "");
+          setOrderPhone(conv.customer?.phone || "");
         }
-        lastActiveMsgCountRef.current[id] = msgCount;
       }
     } catch (err: any) {
       if (err?.name === "AbortError") return;
@@ -533,15 +602,15 @@ export default function UnifiedInboxPage() {
       if (activeFetchAbortRef.current === abortController) {
         activeFetchAbortRef.current = null;
       }
+      isFetchingActiveThreadRef.current = false;
     }
   };
 
-  // Fast & Responsive Customer Selection
+  // ─── Fast & Responsive Customer Selection ────────────────────────────────────
   const handleSelectConversation = (conv: Conversation) => {
     if (!conv?.id) return;
     if (activeConvId === conv.id) return;
 
-    const start = performance.now();
     const nextGen = ++activeConvRequestIdRef.current;
 
     // 1. Immediately abort previous active request
@@ -550,12 +619,17 @@ export default function UnifiedInboxPage() {
       activeFetchAbortRef.current = null;
     }
 
-    // 2. Immediately update state references
+    // 2. Immediately update active state
     activeConvIdRef.current = conv.id;
     setActiveConvId(conv.id);
+    lastKnownActiveMsgTimestampRef.current = null;
 
     // 3. Instant Cache Retrieval (0ms UI latency)
     const cachedMessages = convMessagesCacheRef.current.get(conv.id) || conv.messages || [];
+    if (cachedMessages.length > 0) {
+      lastKnownActiveMsgTimestampRef.current = cachedMessages[cachedMessages.length - 1].sentAt;
+    }
+
     setActiveConv({
       ...conv,
       messages: cachedMessages,
@@ -563,11 +637,11 @@ export default function UnifiedInboxPage() {
     setReplyText("");
     cleanupPendingAttachment();
 
-    // 4. Background fetch for full fresh thread & order details
-    fetchActiveConversation(conv.id, nextGen, start);
+    // 4. Launch full fresh thread & order details fetch
+    fetchActiveConversation(conv.id, false, nextGen);
   };
 
-  // Local-First Attachment Lifecycle
+  // ─── Local-First Attachment Lifecycle ────────────────────────────────────────
   const cleanupPendingAttachment = () => {
     setPendingAttachment((prev) => {
       if (prev?.localPreviewUrl && prev.localPreviewUrl.startsWith("blob:")) {
@@ -644,13 +718,47 @@ export default function UnifiedInboxPage() {
     fileInputRef.current.click();
   };
 
-  // Send Message & Upload Workflow
+  // ─── Send Message with Optimistic UI & Immediate State Update ────────────────
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
     const hasText = Boolean(replyText.trim());
     const hasAttachment = Boolean(pendingAttachment);
 
     if ((!hasText && !hasAttachment) || !activeConvId) return;
+
+    const sendingConvId = activeConvId;
+    const outboundText = replyText.trim();
+    const tempMessageId = `temp_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+
+    // 1. Optimistic Immediate Insertion (0ms Latency!)
+    const optimisticMsg: Message = {
+      id: tempMessageId,
+      direction: "OUTBOUND",
+      textContent: outboundText,
+      mediaUrl: pendingAttachment?.localPreviewUrl,
+      mediaType: pendingAttachment?.mediaType,
+      sentAt: new Date().toISOString(),
+      status: "SENDING",
+    };
+
+    setActiveConv((prev) => {
+      if (!prev || prev.id !== sendingConvId) return prev;
+      const updatedMessages = [...(prev.messages || []), optimisticMsg];
+      convMessagesCacheRef.current.set(sendingConvId, updatedMessages);
+      return {
+        ...prev,
+        messages: updatedMessages,
+        lastMessageAt: optimisticMsg.sentAt,
+        lastMessagePreview: outboundText || `Sent a ${pendingAttachment?.mediaType?.toLowerCase() || "file"}`,
+      };
+    });
+
+    // Clear input & staged preview immediately
+    setReplyText("");
+    const stagedFile = pendingAttachment?.file;
+    const stagedMediaType = pendingAttachment?.mediaType;
+    const stagedFilename = pendingAttachment?.filename;
+    cleanupPendingAttachment();
 
     setSending(true);
 
@@ -659,12 +767,10 @@ export default function UnifiedInboxPage() {
     let uploadedFilename: string | undefined;
 
     try {
-      // Step 1: Explicit Upload ONLY upon Send
-      if (pendingAttachment) {
-        setPendingAttachment((prev) => (prev ? { ...prev, status: "UPLOADING" } : null));
-
+      // Step A: Upload file if attachment existed
+      if (stagedFile) {
         const formData = new FormData();
-        formData.append("file", pendingAttachment.file);
+        formData.append("file", stagedFile);
 
         const uploadRes = await fetch("/api/upload", {
           method: "POST",
@@ -673,26 +779,21 @@ export default function UnifiedInboxPage() {
 
         const uploadData = await uploadRes.json();
         if (!uploadRes.ok || uploadData.status !== "success") {
-          const errMsg = uploadData.error || "Failed to upload attachment.";
-          setPendingAttachment((prev) => (prev ? { ...prev, status: "FAILED", errorMessage: errMsg } : null));
-          setSending(false);
-          return;
+          throw new Error(uploadData.error || "Failed to upload attachment.");
         }
 
         uploadedUrl = uploadData.url;
-        uploadedMediaType = uploadData.mediaType || pendingAttachment.mediaType;
-        uploadedFilename = uploadData.filename || pendingAttachment.filename;
-
-        setPendingAttachment((prev) => (prev ? { ...prev, status: "SENDING" } : null));
+        uploadedMediaType = uploadData.mediaType || stagedMediaType;
+        uploadedFilename = uploadData.filename || stagedFilename;
       }
 
-      // Step 2: Send Message to Platform & Persist in DB
+      // Step B: Send Message via API
       const res = await fetch("/api/messages/send", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          conversationId: activeConvId,
-          textContent: replyText.trim(),
+          conversationId: sendingConvId,
+          textContent: outboundText,
           mediaUrl: uploadedUrl,
           mediaType: uploadedMediaType,
           filename: uploadedFilename,
@@ -700,53 +801,97 @@ export default function UnifiedInboxPage() {
       });
 
       const data = await res.json();
-      if (data.status === "success") {
-        setReplyText("");
-        cleanupPendingAttachment();
-        fetchActiveConversation(activeConvId);
-        fetchConversations(false);
+      if (data.status === "success" && data.message) {
+        const persistedMsg: Message = data.message;
 
-        // Multi-tab broadcast
+        // Reconcile optimistic message with authoritative database record
+        setActiveConv((prev) => {
+          if (!prev || prev.id !== sendingConvId) return prev;
+          const updatedMessages = (prev.messages || []).map((m) =>
+            m.id === tempMessageId ? { ...persistedMsg, status: "SENT" as const } : m
+          );
+          convMessagesCacheRef.current.set(sendingConvId, updatedMessages);
+          return { ...prev, messages: updatedMessages };
+        });
+
+        lastKnownActiveMsgTimestampRef.current = persistedMsg.sentAt;
+
+        // Broadcast across tabs
         if (broadcastChannelRef.current) {
-          broadcastChannelRef.current.postMessage({ type: "MESSAGE_SENT", convId: activeConvId });
+          broadcastChannelRef.current.postMessage({ type: "MESSAGE_SENT", convId: sendingConvId });
         }
+
+        // Silent delta refresh of conversation list
+        fetchConversations(true);
       } else {
-        const errorMsg = data.error || data.message || "Failed to send message";
-        if (pendingAttachment) {
-          setPendingAttachment((prev) => (prev ? { ...prev, status: "FAILED", errorMessage: errorMsg } : null));
-        }
-        alert(errorMsg);
+        throw new Error(data.error || data.message || "Failed to send message");
       }
     } catch (err: any) {
       console.error("Error sending message:", err);
-      if (pendingAttachment) {
-        setPendingAttachment((prev) => (prev ? { ...prev, status: "FAILED", errorMessage: err.message || "Network error" } : null));
-      }
-      alert("Error sending message. Please check your connection.");
+
+      // Mark optimistic message as FAILED
+      setActiveConv((prev) => {
+        if (!prev || prev.id !== sendingConvId) return prev;
+        const updatedMessages = (prev.messages || []).map((m) =>
+          m.id === tempMessageId ? { ...m, status: "FAILED" as const } : m
+        );
+        convMessagesCacheRef.current.set(sendingConvId, updatedMessages);
+        return { ...prev, messages: updatedMessages };
+      });
+
+      alert(err.message || "Error sending message.");
     } finally {
       setSending(false);
     }
   };
 
-  // AI Suggestion Approval
+  // ─── AI Suggestion Approval ──────────────────────────────────────────────────
   const handleApproveSuggestion = async (suggestionText: string) => {
     if (!activeConvId || !suggestionText.trim()) return;
     setAiApprovalSending(true);
+
+    const sendingConvId = activeConvId;
+    const tempId = `temp_ai_${Date.now()}`;
+
+    const optimisticMsg: Message = {
+      id: tempId,
+      direction: "OUTBOUND",
+      textContent: suggestionText.trim(),
+      sentAt: new Date().toISOString(),
+      status: "SENDING",
+    };
+
+    setActiveConv((prev) => {
+      if (!prev || prev.id !== sendingConvId) return prev;
+      const updatedMessages = [...(prev.messages || []), optimisticMsg];
+      convMessagesCacheRef.current.set(sendingConvId, updatedMessages);
+      return { ...prev, messages: updatedMessages };
+    });
+
+    setReplyText("");
+    setDismissedSuggestions((prev) => ({ ...prev, [sendingConvId]: true }));
+
     try {
       const res = await fetch("/api/messages/send", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          conversationId: activeConvId,
+          conversationId: sendingConvId,
           textContent: suggestionText.trim(),
         }),
       });
       const data = await res.json();
-      if (data.status === "success") {
-        setReplyText("");
-        setDismissedSuggestions((prev) => ({ ...prev, [activeConvId]: true }));
-        fetchActiveConversation(activeConvId);
-        fetchConversations(false);
+      if (data.status === "success" && data.message) {
+        const persistedMsg = data.message;
+        setActiveConv((prev) => {
+          if (!prev || prev.id !== sendingConvId) return prev;
+          const updated = (prev.messages || []).map((m) =>
+            m.id === tempId ? { ...persistedMsg, status: "SENT" as const } : m
+          );
+          convMessagesCacheRef.current.set(sendingConvId, updated);
+          return { ...prev, messages: updated };
+        });
+        fetchConversations(true);
       } else {
         alert(data.error || "Failed to send AI approved response");
       }
@@ -757,7 +902,7 @@ export default function UnifiedInboxPage() {
     }
   };
 
-  // Quick Negotiation (Tawad)
+  // ─── Quick Negotiation (Tawad) ───────────────────────────────────────────────
   const handleQuickNegotiation = async (action: "ACCEPT_OFFER" | "COUNTER_OFFER") => {
     if (!activeConvId || !activeConv) return;
     const latestLead = activeConv.customer?.leads?.[0];
@@ -788,7 +933,7 @@ export default function UnifiedInboxPage() {
       const data = await res.json();
       if (data.status === "success") {
         setCustomOfferInput("");
-        fetchActiveConversation(activeConvId);
+        fetchActiveConversation(activeConvId, false);
         if (data.outboundMessageText) {
           setReplyText(data.outboundMessageText);
         }
@@ -802,7 +947,7 @@ export default function UnifiedInboxPage() {
     }
   };
 
-  // 1-Click Order Creation
+  // ─── 1-Click Order Creation ──────────────────────────────────────────────────
   const handleCreateOrder = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!activeConv || !selectedProductId) return;
@@ -851,7 +996,7 @@ export default function UnifiedInboxPage() {
         setTimeout(() => {
           setShowOrderModal(false);
           setOrderSuccessMessage("");
-          fetchActiveConversation(activeConv.id);
+          fetchActiveConversation(activeConv.id, false);
         }, 1200);
       } else {
         alert(data.error || "Failed to create order");
@@ -864,7 +1009,7 @@ export default function UnifiedInboxPage() {
     }
   };
 
-  // Multi-Tab Broadcast & Visibility Lifecycle
+  // ─── Multi-Tab Broadcast & Visibility Lifecycle ──────────────────────────────
   useEffect(() => {
     if (typeof window !== "undefined" && "BroadcastChannel" in window) {
       try {
@@ -874,7 +1019,7 @@ export default function UnifiedInboxPage() {
           if (event.data?.type === "MESSAGE_SENT" || event.data?.type === "INBOX_UPDATE") {
             fetchConversations(true);
             if (activeConvIdRef.current) {
-              fetchActiveConversation(activeConvIdRef.current);
+              fetchActiveConversation(activeConvIdRef.current, true);
             }
           }
         };
@@ -888,7 +1033,7 @@ export default function UnifiedInboxPage() {
         // Tab restored -> immediate delta sync
         fetchConversations(true);
         if (activeConvIdRef.current) {
-          fetchActiveConversation(activeConvIdRef.current);
+          fetchActiveConversation(activeConvIdRef.current, true);
         }
       }
     };
@@ -909,7 +1054,7 @@ export default function UnifiedInboxPage() {
     fetchProducts();
   }, [inboxMode, platformFilter, leadFilter]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Active Chat Polling
+  // ─── Dedicated Active Thread Delta Poller (1.5s interval) ───────────────────
   useEffect(() => {
     if (!activeConvId) return;
 
@@ -917,24 +1062,23 @@ export default function UnifiedInboxPage() {
       document.title = "BizPilot - Customer Messages";
     }
 
-    const capturedConvId = activeConvId;
-    const capturedGen = activeConvRequestIdRef.current;
+    const targetConvId = activeConvId;
 
     const chatInterval = setInterval(() => {
       if (typeof document !== "undefined" && document.hidden) return;
-      if (activeConvIdRef.current !== capturedConvId) return;
-      fetchActiveConversation(capturedConvId, capturedGen);
-    }, 2500);
+      if (activeConvIdRef.current !== targetConvId) return;
+      fetchActiveConversation(targetConvId, true);
+    }, 1500);
 
     return () => clearInterval(chatInterval);
   }, [activeConvId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Background Delta Polling
+  // ─── Background Delta Polling for Conversations List ─────────────────────────
   useEffect(() => {
     const listInterval = setInterval(() => {
       if (typeof document !== "undefined" && document.hidden) return;
       fetchConversations(true);
-    }, 4000);
+    }, 3500);
 
     return () => clearInterval(listInterval);
   }, [inboxMode, platformFilter, leadFilter]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -1330,7 +1474,7 @@ export default function UnifiedInboxPage() {
                             const mediaUrl = msg.mediaUrl;
                             const mediaType = msg.mediaType;
 
-                            if (mediaType === "IMAGE" || /\.(jpg|jpeg|png|webp|gif)($|\?)/i.test(mediaUrl) || mediaUrl.startsWith("data:image/")) {
+                            if (mediaType === "IMAGE" || /\.(jpg|jpeg|png|webp|gif)($|\?)/i.test(mediaUrl) || mediaUrl.startsWith("data:image/") || mediaUrl.startsWith("blob:")) {
                               return (
                                 <div className="mb-2 relative group overflow-hidden rounded-xl border border-slate-200/60 bg-black/5">
                                   <img
@@ -1354,7 +1498,7 @@ export default function UnifiedInboxPage() {
                               );
                             }
 
-                            if (mediaType === "VIDEO" || /\.(mp4|webm|mov)($|\?)/i.test(mediaUrl) || mediaUrl.startsWith("data:video/")) {
+                            if (mediaType === "VIDEO" || /\.(mp4|webm|mov)($|\?)/i.test(mediaUrl) || mediaUrl.startsWith("data:video/") || mediaUrl.startsWith("blob:")) {
                               return (
                                 <div className="mb-2 overflow-hidden rounded-xl border border-slate-200/60 bg-black">
                                   <video
@@ -1367,7 +1511,7 @@ export default function UnifiedInboxPage() {
                               );
                             }
 
-                            if (mediaType === "AUDIO" || /\.(mp3|ogg|wav|m4a|aac)($|\?)/i.test(mediaUrl) || mediaUrl.startsWith("data:audio/")) {
+                            if (mediaType === "AUDIO" || /\.(mp3|ogg|wav|m4a|aac)($|\?)/i.test(mediaUrl) || mediaUrl.startsWith("data:audio/") || mediaUrl.startsWith("blob:")) {
                               return (
                                 <div className="mb-2 p-2 bg-white/10 rounded-xl border border-white/20">
                                   <div className="flex items-center gap-1.5 mb-1 text-[11px] font-bold">
@@ -1416,12 +1560,19 @@ export default function UnifiedInboxPage() {
                           )}
                         </div>
 
-                        <span className="text-[9px] text-slate-400 mt-1 px-1">
-                          {new Date(msg.sentAt).toLocaleTimeString([], {
-                            hour: "2-digit",
-                            minute: "2-digit",
-                          })}
-                        </span>
+                        <div className="flex items-center gap-1 mt-1 px-1 text-[9px] text-slate-400">
+                          <span>
+                            {new Date(msg.sentAt).toLocaleTimeString([], {
+                              hour: "2-digit",
+                              minute: "2-digit",
+                            })}
+                          </span>
+                          {!isCustomer && (
+                            <span>
+                              {msg.status === "SENDING" ? "• Sending..." : msg.status === "FAILED" ? "• Failed" : "✓"}
+                            </span>
+                          )}
+                        </div>
                       </div>
                     );
                   })

@@ -10,7 +10,62 @@ export async function GET(req: NextRequest, { params }: { params: { id: string }
     if (errorResponse) return errorResponse;
 
     const conversationId = params.id;
+    const searchParams = req.nextUrl.searchParams;
+    const sinceParam = searchParams.get("since");
+    const deltaOnly = searchParams.get("deltaOnly") === "true";
+    const serverTimestamp = new Date().toISOString();
 
+    // 1. High-Performance Active Thread Delta Polling
+    if (sinceParam && deltaOnly) {
+      const sinceDate = new Date(isNaN(Number(sinceParam)) ? sinceParam : Number(sinceParam));
+      if (!isNaN(sinceDate.getTime())) {
+        const convSummary = await prisma.conversation.findUnique({
+          where: { id: conversationId },
+          select: { id: true, businessId: true, unreadCount: true },
+        });
+
+        if (!convSummary || (user?.role !== "ADMIN" && convSummary.businessId !== businessId)) {
+          return NextResponse.json({ error: "Conversation not found" }, { status: 404 });
+        }
+
+        const newMessages = await prisma.message.findMany({
+          where: {
+            conversationId,
+            sentAt: { gt: sinceDate },
+          },
+          orderBy: { sentAt: "asc" },
+        });
+
+        if (newMessages.length === 0) {
+          return NextResponse.json({
+            status: "success",
+            hasUpdates: false,
+            serverTimestamp,
+            newMessages: [],
+          });
+        }
+
+        if (convSummary.unreadCount > 0) {
+          await prisma.conversation.update({
+            where: { id: conversationId },
+            data: { unreadCount: 0 },
+          });
+          await prisma.message.updateMany({
+            where: { conversationId, isRead: false },
+            data: { isRead: true },
+          });
+        }
+
+        return NextResponse.json({
+          status: "success",
+          hasUpdates: true,
+          serverTimestamp,
+          newMessages,
+        });
+      }
+    }
+
+    // 2. Full Conversation & Message Thread Query
     const conversation = await prisma.conversation.findUnique({
       where: { id: conversationId },
       include: {
@@ -56,6 +111,8 @@ export async function GET(req: NextRequest, { params }: { params: { id: string }
 
     return NextResponse.json({
       status: "success",
+      hasUpdates: true,
+      serverTimestamp,
       conversation,
     });
   } catch (error: any) {
