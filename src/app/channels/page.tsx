@@ -407,6 +407,16 @@ export default function ChannelsPage() {
   const [successMsg, setSuccessMsg] = useState("");
   const [errorMsg, setErrorMsg] = useState("");
 
+  // OAuth Connection & Multi-Page Selection State
+  const [oauthLoadingPlatform, setOauthLoadingPlatform] = useState<string | null>(null);
+  const [pageSelectionSession, setPageSelectionSession] = useState<{
+    platform: string;
+    sessionToken: string;
+    accounts: Array<{ platformAccountId: string; platformAccountName: string; category?: string }>;
+  } | null>(null);
+  const [selectedDiscoveredAccountId, setSelectedDiscoveredAccountId] = useState<string>("");
+  const [submittingSelection, setSubmittingSelection] = useState(false);
+
   // Setup guide visibility
   const [showSetupGuide, setShowSetupGuide] = useState(false);
   const [showWorkflow, setShowWorkflow] = useState(false);
@@ -432,6 +442,102 @@ export default function ChannelsPage() {
     fetchChannels();
   }, [fetchChannels]);
 
+  // ─── OAuth Return & Callback Listener ───
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    const oauthSuccess = params.get("oauth_success");
+    const oauthError = params.get("oauth_error");
+    const oauthSelect = params.get("oauth_select");
+    const platform = params.get("platform") || "Facebook";
+    const accountName = params.get("accountName");
+    const sessionToken = params.get("sessionToken");
+
+    if (oauthSuccess) {
+      setSuccessMsg(`✓ Successfully connected ${accountName || platform} via official Meta authorization! Initial message sync is running in the background.`);
+      fetchChannels();
+      window.history.replaceState({}, "", "/channels");
+      setTimeout(() => setSuccessMsg(""), 7000);
+    } else if (oauthError) {
+      if (oauthError === "cancelled") {
+        setErrorMsg("Authorization was cancelled. No channel was modified.");
+      } else if (oauthError === "tiktok_approval_required") {
+        setErrorMsg("TikTok Business Messaging requires ByteDance commercial enterprise developer partner approval.");
+      } else {
+        setErrorMsg(`Authorization note: ${decodeURIComponent(oauthError)}`);
+      }
+      window.history.replaceState({}, "", "/channels");
+    } else if (oauthSelect && sessionToken && platform) {
+      try {
+        const parts = sessionToken.split(".");
+        const payload = JSON.parse(atob(parts[0]));
+        const accounts = JSON.parse(atob(payload.redirectUri));
+        setPageSelectionSession({ platform, sessionToken, accounts });
+        if (accounts.length > 0) {
+          setSelectedDiscoveredAccountId(accounts[0].platformAccountId);
+        }
+      } catch {
+        setErrorMsg("Selection session invalid or expired. Please connect again.");
+      }
+      window.history.replaceState({}, "", "/channels");
+    }
+  }, [fetchChannels]);
+
+  // ─── Official 1-Click OAuth Handlers ───
+
+  const handleOAuthInitiate = async (platform: string, isReconnect = false, connectionId?: string) => {
+    setOauthLoadingPlatform(platform);
+    setErrorMsg("");
+    try {
+      const params = new URLSearchParams();
+      params.set("platform", platform);
+      if (isReconnect) params.set("reconnect", "true");
+      if (connectionId) params.set("connectionId", connectionId);
+
+      const res = await fetch(`/api/channels/oauth/initiate?${params.toString()}`);
+      const data = await res.json();
+
+      if (data.status === "success" && data.authUrl) {
+        window.location.href = data.authUrl;
+      } else {
+        setErrorMsg(data.error || "Failed to initiate official authorization flow.");
+        setOauthLoadingPlatform(null);
+      }
+    } catch (err: any) {
+      setErrorMsg("Connection request failed. Please check your internet connection.");
+      setOauthLoadingPlatform(null);
+    }
+  };
+
+  const handleSelectAccountSubmit = async () => {
+    if (!pageSelectionSession || !selectedDiscoveredAccountId) return;
+    setSubmittingSelection(true);
+    try {
+      const res = await fetch("/api/channels/oauth/select-account", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sessionToken: pageSelectionSession.sessionToken,
+          selectedAccountId: selectedDiscoveredAccountId,
+          platform: pageSelectionSession.platform,
+        }),
+      });
+      const data = await res.json();
+      if (res.ok && data.status === "success") {
+        setSuccessMsg(`✓ Successfully connected ${data.connection.platformAccountName}!`);
+        setPageSelectionSession(null);
+        fetchChannels();
+        setTimeout(() => setSuccessMsg(""), 6000);
+      } else {
+        setErrorMsg(data.error || "Failed to link selected Page.");
+      }
+    } catch {
+      setErrorMsg("Failed to connect account. Please try again.");
+    } finally {
+      setSubmittingSelection(false);
+    }
+  };
+
   // ─── Wizard Handlers ───
 
   const openWizard = (ch: ChannelInfo, initialName = "", initialId = "", initialToken = "") => {
@@ -442,7 +548,7 @@ export default function ChannelsPage() {
       cleanId = "";
     }
     setWizardChannel(ch);
-    setWizardStep("info");
+    setWizardStep("connect");
     setFormData({ accountName: initialName, accountId: cleanId, accessToken: cleanToken });
     setErrorMsg("");
     setModalView("wizard");
@@ -1268,11 +1374,25 @@ export default function ChannelsPage() {
                   <span>{PLATFORM_INFO[wizardChannel.platform]?.permissionExplanation}</span>
                 </div>
 
-                <div className="flex justify-end gap-2 pt-2 border-t border-slate-100">
+                <div className="flex justify-between items-center gap-2 pt-2 border-t border-slate-100">
                   <button onClick={closeModal} className="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-lg">Cancel</button>
-                  <button onClick={() => setWizardStep("requirements")} className="px-5 py-2 bg-purple-600 hover:bg-purple-700 text-white text-xs font-bold rounded-lg flex items-center gap-1.5">
-                    Continue <ArrowRight className="w-3.5 h-3.5" aria-hidden="true" />
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button onClick={() => setWizardStep("requirements")} className="px-3 py-2 border border-slate-200 hover:bg-slate-50 text-slate-700 text-xs font-semibold rounded-lg">
+                      Requirements
+                    </button>
+                    <button
+                      onClick={() => handleOAuthInitiate(wizardChannel.platform)}
+                      disabled={oauthLoadingPlatform === wizardChannel.platform}
+                      className="px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white text-xs font-bold rounded-lg flex items-center gap-1.5 shadow-sm disabled:opacity-50"
+                    >
+                      {oauthLoadingPlatform === wizardChannel.platform ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <Zap className="w-3.5 h-3.5 text-amber-300" />
+                      )}
+                      <span>Official 1-Click Sign-In</span>
+                    </button>
+                  </div>
                 </div>
               </div>
             )}
@@ -1303,8 +1423,17 @@ export default function ChannelsPage() {
                   <button onClick={() => setWizardStep("info")} className="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-lg flex items-center gap-1">
                     <ArrowLeft className="w-3.5 h-3.5" aria-hidden="true" /> Back
                   </button>
-                  <button onClick={() => setWizardStep("connect")} className="px-5 py-2 bg-purple-600 hover:bg-purple-700 text-white text-xs font-bold rounded-lg flex items-center gap-1.5">
-                    {PLATFORM_INFO[wizardChannel.platform]?.approvalRequired ? "Continue Anyway" : "I\u0027m Ready"} <ArrowRight className="w-3.5 h-3.5" aria-hidden="true" />
+                  <button
+                    onClick={() => handleOAuthInitiate(wizardChannel.platform)}
+                    disabled={oauthLoadingPlatform === wizardChannel.platform}
+                    className="px-5 py-2 bg-purple-600 hover:bg-purple-700 text-white text-xs font-bold rounded-lg flex items-center gap-1.5 shadow-sm disabled:opacity-50"
+                  >
+                    {oauthLoadingPlatform === wizardChannel.platform ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <Zap className="w-3.5 h-3.5 text-amber-300" />
+                    )}
+                    <span>Connect via Official Sign-In</span>
                   </button>
                 </div>
               </div>
@@ -1315,72 +1444,95 @@ export default function ChannelsPage() {
               <div className="space-y-4">
                 <div className="p-3 rounded-lg bg-sky-50 border border-sky-200 text-xs text-sky-800 flex items-start gap-2">
                   <ShieldCheck className="w-4 h-4 text-sky-600 shrink-0 mt-0.5" aria-hidden="true" />
-                  <span>BizPilot only requests the permissions needed to receive messages. Your data stays private.</span>
+                  <span>BizPilot only requests the permissions needed to receive messages. Your personal chats, feed, and passwords remain 100% private.</span>
                 </div>
 
-                <div className="space-y-3">
-                  <div>
-                    <label htmlFor="accountName" className="block text-xs font-semibold text-slate-700 mb-1">Your Account or Page Name *</label>
-                    <input
-                      id="accountName"
-                      type="text"
-                      required
-                      placeholder={`e.g. ${wizardChannel.name === "WhatsApp Business" ? "My Business +63 912 345 6789" : "BizPilot"}`}
-                      value={formData.accountName}
-                      onChange={(e) => setFormData({ ...formData, accountName: e.target.value })}
-                      className="w-full p-2.5 rounded-lg border border-slate-300 bg-white text-slate-900 text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-purple-500"
-                      aria-required="true"
-                    />
-                    <p className="text-[11px] text-slate-400 mt-1">The name of your business Page or account on this platform.</p>
+                {/* Primary Action: Official 1-Click OAuth Flow */}
+                <div className="p-4 bg-purple-50/70 border border-purple-200/80 rounded-xl space-y-3 text-center">
+                  <div className="flex items-center justify-center gap-2">
+                    {PLATFORM_INFO[wizardChannel.platform]?.icon}
+                    <span className="font-bold text-sm text-purple-950">Official 1-Click Connection</span>
                   </div>
+                  <p className="text-xs text-purple-800 leading-relaxed max-w-sm mx-auto">
+                    Sign in directly with your official account. You will never need to paste complex tokens or technical credentials.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => handleOAuthInitiate(wizardChannel.platform)}
+                    disabled={oauthLoadingPlatform === wizardChannel.platform}
+                    className="w-full py-3 px-4 bg-purple-600 hover:bg-purple-700 text-white font-bold text-xs rounded-xl shadow-md transition-all flex items-center justify-center gap-2 disabled:opacity-50"
+                  >
+                    {oauthLoadingPlatform === wizardChannel.platform ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        <span>Opening Official Sign-In...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Zap className="w-4 h-4 text-amber-300" />
+                        <span>Connect {wizardChannel.name.split("/")[0].trim()} via Official Sign-In</span>
+                      </>
+                    )}
+                  </button>
+                  <p className="text-[10px] text-purple-700 font-medium">
+                    🔒 BizPilot will never ask for your password, 2FA code, or OTP.
+                  </p>
+                </div>
 
-                  <div>
-                    <label htmlFor="accessToken" className="block text-xs font-semibold text-slate-700 mb-1">
-                      {wizardChannel.platform === "FACEBOOK" || wizardChannel.platform === "INSTAGRAM" ? "Page Access Token" : "Platform Access Token"}
-                    </label>
-                    <input
-                      id="accessToken"
-                      type="password"
-                      placeholder="Paste token (starts with EAAB... or sim_ for test mode)"
-                      value={formData.accessToken}
-                      onChange={(e) => {
-                        const val = e.target.value;
-                        setFormData({ ...formData, accessToken: val });
-                      }}
-                      className="w-full p-2.5 rounded-lg border border-slate-300 bg-white text-slate-900 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-purple-500"
-                    />
-                    <p className="text-[11px] text-slate-400 mt-1">Generated from Meta Developer portal (Messenger → API Setup → Generate Token).</p>
-                  </div>
+                {/* Advanced Developer Fallback */}
+                <details className="group border border-slate-200 rounded-xl p-3 bg-slate-50">
+                  <summary className="text-[11px] font-semibold text-slate-600 cursor-pointer hover:text-purple-600 flex items-center justify-between list-none">
+                    <span className="flex items-center gap-1.5">
+                      <Settings className="w-3.5 h-3.5 text-slate-500" />
+                      Advanced Developer Configuration (Custom Access Token)
+                    </span>
+                    <ChevronDown className="w-3.5 h-3.5 transition-transform group-open:rotate-180 text-slate-400" />
+                  </summary>
 
-                  <details className="group">
-                    <summary className="text-[11px] font-semibold text-slate-500 cursor-pointer hover:text-purple-600 flex items-center gap-1 list-none">
-                      <Settings className="w-3 h-3" aria-hidden="true" /> Advanced: Account / Page ID (optional)
-                    </summary>
-                    <div className="mt-2">
+                  <div className="space-y-3 mt-3 pt-3 border-t border-slate-200">
+                    <div>
+                      <label htmlFor="accountName" className="block text-xs font-semibold text-slate-700 mb-1">Your Account or Page Name *</label>
                       <input
+                        id="accountName"
                         type="text"
-                        placeholder="Leave blank for auto-detection from token"
-                        value={formData.accountId}
-                        onChange={(e) => setFormData({ ...formData, accountId: e.target.value })}
-                        className="w-full p-2.5 rounded-lg border border-slate-200 bg-slate-50 text-slate-900 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-purple-500"
-                        aria-label="Platform account ID"
+                        placeholder={`e.g. ${wizardChannel.name === "WhatsApp Business" ? "My Business +63 912 345 6789" : "My Facebook Store"}`}
+                        value={formData.accountName}
+                        onChange={(e) => setFormData({ ...formData, accountName: e.target.value })}
+                        className="w-full p-2.5 rounded-lg border border-slate-300 bg-white text-slate-900 text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-purple-500"
                       />
-                      <p className="text-[11px] text-slate-400 mt-1">Automatically discovered if your Page Access Token is provided.</p>
                     </div>
-                  </details>
-                </div>
+
+                    <div>
+                      <label htmlFor="accessToken" className="block text-xs font-semibold text-slate-700 mb-1">
+                        Custom Access Token (Optional)
+                      </label>
+                      <input
+                        id="accessToken"
+                        type="password"
+                        placeholder="Paste custom token (starts with EAAB... or sim_ for test mode)"
+                        value={formData.accessToken}
+                        onChange={(e) => setFormData({ ...formData, accessToken: e.target.value })}
+                        className="w-full p-2.5 rounded-lg border border-slate-300 bg-white text-slate-900 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-purple-500"
+                      />
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={handleWizardConnect}
+                      disabled={saving || !formData.accountName.trim()}
+                      className="w-full py-2 bg-slate-800 hover:bg-slate-900 text-white font-bold text-xs rounded-lg transition-colors disabled:opacity-50"
+                    >
+                      {saving ? "Saving Custom Connection..." : "Save Custom Credentials"}
+                    </button>
+                  </div>
+                </details>
 
                 <div className="flex justify-between gap-2 pt-2 border-t border-slate-100">
                   <button onClick={() => setWizardStep("requirements")} className="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-lg flex items-center gap-1">
                     <ArrowLeft className="w-3.5 h-3.5" aria-hidden="true" /> Back
                   </button>
-                  <button
-                    onClick={handleWizardConnect}
-                    disabled={saving || !formData.accountName.trim()}
-                    className="px-5 py-2 bg-purple-600 hover:bg-purple-700 text-white text-xs font-bold rounded-lg flex items-center gap-1.5 disabled:opacity-50 transition-colors"
-                    aria-label="Connect now"
-                  >
-                    <Zap className="w-3.5 h-3.5" aria-hidden="true" /> Connect Now
+                  <button onClick={closeModal} className="px-4 py-2 text-xs font-semibold text-slate-500 hover:bg-slate-100 rounded-lg">
+                    Close
                   </button>
                 </div>
               </div>
@@ -1861,6 +2013,86 @@ export default function ChannelsPage() {
                   <MessageSquare className="w-3.5 h-3.5" /> Open in Messages
                 </Link>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ─── MULTI-PAGE ACCOUNT SELECTION MODAL (OAUTH) ─── */}
+      {pageSelectionSession && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4" role="dialog" aria-modal="true">
+          <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border border-slate-100 space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <div className="flex items-center gap-2.5">
+                <div className="w-9 h-9 rounded-xl bg-purple-50 flex items-center justify-center">
+                  <Radio className="w-5 h-5 text-purple-600" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-slate-900 text-sm">Select Your Facebook Page</h3>
+                  <p className="text-[11px] text-slate-500">Choose which Page to connect to your BizPilot store</p>
+                </div>
+              </div>
+              <button onClick={() => setPageSelectionSession(null)} className="p-1 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <p className="text-xs text-slate-600 leading-relaxed">
+              We found {pageSelectionSession.accounts.length} business Pages associated with your account. Select the Page you want to link:
+            </p>
+
+            <div className="space-y-2 max-h-60 overflow-y-auto pr-1">
+              {pageSelectionSession.accounts.map((acc) => {
+                const isSelected = selectedDiscoveredAccountId === acc.platformAccountId;
+                return (
+                  <button
+                    key={acc.platformAccountId}
+                    type="button"
+                    onClick={() => setSelectedDiscoveredAccountId(acc.platformAccountId)}
+                    className={`w-full p-3 rounded-xl border text-left flex items-center justify-between transition-all ${
+                      isSelected
+                        ? "border-purple-600 bg-purple-50/80 shadow-xs"
+                        : "border-slate-200 hover:border-slate-300 bg-white"
+                    }`}
+                  >
+                    <div>
+                      <p className="font-bold text-xs text-slate-900">{acc.platformAccountName}</p>
+                      <p className="text-[11px] text-slate-500">ID: {acc.platformAccountId} {acc.category ? `• ${acc.category}` : ""}</p>
+                    </div>
+                    <div className={`w-4 h-4 rounded-full border flex items-center justify-center ${isSelected ? "border-purple-600 bg-purple-600 text-white" : "border-slate-300"}`}>
+                      {isSelected && <Check className="w-3 h-3" />}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setPageSelectionSession(null)}
+                className="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-lg"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleSelectAccountSubmit}
+                disabled={submittingSelection || !selectedDiscoveredAccountId}
+                className="px-5 py-2 bg-purple-600 hover:bg-purple-700 text-white text-xs font-bold rounded-lg flex items-center gap-1.5 shadow-sm transition-colors disabled:opacity-50"
+              >
+                {submittingSelection ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <span>Connecting Page...</span>
+                  </>
+                ) : (
+                  <>
+                    <Zap className="w-3.5 h-3.5" />
+                    <span>Connect Selected Page</span>
+                  </>
+                )}
+              </button>
             </div>
           </div>
         </div>
