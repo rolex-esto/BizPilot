@@ -344,26 +344,39 @@ export default function UnifiedInboxPage() {
     setInboxMode(newMode);
   };
 
-  // Channel Sync Handler
-  const handleSyncChannels = async () => {
+  // Channel Sync Handler (Multi-Platform)
+  const [syncStatusToast, setSyncStatusToast] = useState<{
+    message: string;
+    platforms?: Record<string, any>;
+  } | null>(null);
+
+  const handleSyncChannels = async (targetPlatform?: string) => {
     if (syncingChannels || inboxMode !== "LIVE") return;
     setSyncingChannels(true);
     try {
+      const platformToSync = targetPlatform || platformFilter || "ALL";
       const res = await fetch("/api/channels/sync", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          sourceType: "ALL",
+          platform: platformToSync,
           environment: "LIVE",
           pullFromMeta: true,
           limit: 10,
         }),
       });
       const data = await res.json();
-      if (data.status === "success") {
+      if (data.success || data.status === "success") {
+        const syncMsg = data.message || (data.syncedCount > 0 ? `Synced ${data.syncedCount} new message(s).` : "All channels are up to date.");
+        setSyncStatusToast({
+          message: syncMsg,
+          platforms: data.platforms,
+        });
+        setTimeout(() => setSyncStatusToast(null), 5000);
+
         fetchConversations(false);
         if (activeConvIdRef.current) {
-          fetchActiveConversation(activeConvIdRef.current, false);
+          fetchActiveConversation(activeConvIdRef.current, true);
         }
       }
     } catch (err) {
@@ -1220,19 +1233,36 @@ export default function UnifiedInboxPage() {
               <span className="text-xs font-bold text-slate-700">Inbox ({conversations.length})</span>
               <div className="flex items-center gap-1.5">
                 <button
-                  onClick={handleSyncChannels}
+                  onClick={() => handleSyncChannels()}
                   disabled={syncingChannels}
-                  className="px-2 py-0.5 bg-sky-50 text-sky-600 hover:bg-sky-100 border border-sky-200 rounded text-[10px] font-bold inline-flex items-center gap-1 transition-colors disabled:opacity-50"
-                  title="Sync with Meta channels"
+                  className="px-2 py-0.5 bg-sky-50 text-sky-700 hover:bg-sky-100 border border-sky-200 rounded text-[10px] font-bold inline-flex items-center gap-1 transition-colors disabled:opacity-50"
+                  title={
+                    platformFilter !== "ALL"
+                      ? `Sync ${platformFilter.charAt(0) + platformFilter.slice(1).toLowerCase()} messages`
+                      : "Sync connected social channels"
+                  }
                 >
                   <RefreshCw className={`w-2.5 h-2.5 ${syncingChannels ? "animate-spin" : ""}`} />
-                  {syncingChannels ? "Syncing..." : "Sync FB"}
+                  {syncingChannels ? "Syncing..." : platformFilter !== "ALL" ? `Sync ${platformFilter === "FACEBOOK" ? "FB" : platformFilter === "INSTAGRAM" ? "IG" : platformFilter === "WHATSAPP" ? "WA" : "TT"}` : "Sync Channels"}
                 </button>
                 <button onClick={() => fetchConversations(false)} className="text-slate-400 hover:text-slate-600 p-0.5" title="Refresh local inbox">
                   <RefreshCw className="w-3.5 h-3.5" />
                 </button>
               </div>
             </div>
+
+            {/* Sync Feedback Toast */}
+            {syncStatusToast && (
+              <div className="p-2 bg-sky-100 text-sky-950 border border-sky-200 rounded-lg text-[11px] flex items-center justify-between gap-1.5 animate-in fade-in">
+                <div className="flex items-center gap-1 min-w-0">
+                  <CheckCircle className="w-3 h-3 text-sky-600 shrink-0" />
+                  <span className="font-semibold truncate">{syncStatusToast.message}</span>
+                </div>
+                <button onClick={() => setSyncStatusToast(null)} className="text-sky-600 hover:text-sky-800 p-0.5">
+                  <X className="w-3 h-3" />
+                </button>
+              </div>
+            )}
 
             {/* Platform Filter Badges */}
             <div className="flex items-center gap-1 overflow-x-auto pb-1">

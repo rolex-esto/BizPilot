@@ -39,20 +39,30 @@ export async function POST(req: NextRequest) {
 
     const body = await req.json().catch(() => ({}));
     const isBackground = body?.background === true;
+    const targetPlatform = body?.platform || body?.sourceType;
+
+    const whereClause: any = {
+      businessId,
+      status: "CONNECTED",
+    };
+
+    if (targetPlatform && targetPlatform !== "ALL") {
+      whereClause.platform = targetPlatform;
+    } else {
+      whereClause.platform = { in: ["FACEBOOK", "INSTAGRAM", "WHATSAPP", "TIKTOK"] };
+    }
 
     const connections = await prisma.platformConnection.findMany({
-      where: {
-        businessId,
-        platform: { in: ["FACEBOOK", "INSTAGRAM", "WHATSAPP", "TIKTOK"] },
-        status: "CONNECTED",
-      },
+      where: whereClause,
     });
 
     if (connections.length === 0) {
       return NextResponse.json({
-        success: false,
+        success: true,
         syncedCount: 0,
-        message: "No connected social messaging accounts found.",
+        message: "No active social messaging accounts connected for this filter.",
+        platforms: {},
+        connections: [],
       });
     }
 
@@ -70,11 +80,19 @@ export async function POST(req: NextRequest) {
       error?: string;
     }> = [];
 
+    const platformsReport: Record<string, {
+      status: "SYNCED" | "NO_CHANGES" | "WEBHOOK_ACTIVE" | "APPROVAL_REQUIRED" | "FAILED";
+      messagesIngested: number;
+      duplicates: number;
+      mode: "PULL_RECONCILED" | "PUSH_WEBHOOK_FIRST" | "ENTERPRISE_GATED";
+      note?: string;
+    }> = {};
+
     for (const conn of connections) {
       const platform = conn.platform as SupportedPlatform;
       const checkpointBefore = conn.lastSyncAt?.toISOString() ?? null;
 
-      // WhatsApp Cloud API & TikTok are push-webhook first architectures
+      // WhatsApp Cloud API is push-webhook first architecture
       if (platform === "WHATSAPP") {
         connectionResults.push({
           platform,
@@ -84,11 +102,19 @@ export async function POST(req: NextRequest) {
           messagesIngested: 0,
           duplicates: 0,
           pagesFetched: 0,
-          statusNote: "WEBHOOK_PUSH_ACTIVE (WhatsApp Cloud API receives live webhooks; pull reconciliation is not provided by Meta WABA API)",
+          statusNote: "WEBHOOK_PUSH_ACTIVE (WhatsApp Cloud API receives live push webhooks; messages ingest automatically on delivery)",
         });
+        platformsReport[platform] = {
+          status: "WEBHOOK_ACTIVE",
+          messagesIngested: 0,
+          duplicates: 0,
+          mode: "PUSH_WEBHOOK_FIRST",
+          note: "WhatsApp Cloud API operates via live push webhooks.",
+        };
         continue;
       }
 
+      // TikTok requires enterprise developer approval
       if (platform === "TIKTOK") {
         connectionResults.push({
           platform,
@@ -100,13 +126,29 @@ export async function POST(req: NextRequest) {
           pagesFetched: 0,
           statusNote: "ENTERPRISE_WEBHOOK_REQUIRED (TikTok Business Messaging requires enterprise developer approval)",
         });
+        platformsReport[platform] = {
+          status: "APPROVAL_REQUIRED",
+          messagesIngested: 0,
+          duplicates: 0,
+          mode: "ENTERPRISE_GATED",
+          note: "TikTok messaging requires enterprise developer approval.",
+        };
         continue;
       }
 
       if (!conn.accessTokenEncrypted || !conn.platformAccountId) continue;
 
       const rawToken = TokenVault.decrypt(conn.accessTokenEncrypted);
-      if (!rawToken) continue;
+      if (!rawToken) {
+        platformsReport[platform] = {
+          status: "FAILED",
+          messagesIngested: 0,
+          duplicates: 0,
+          mode: "PULL_RECONCILED",
+          note: "Failed to decrypt platform credentials.",
+        };
+        continue;
+      }
 
       const sinceEpochMs = conn.lastSyncAt
         ? conn.lastSyncAt.getTime()
@@ -187,6 +229,14 @@ export async function POST(req: NextRequest) {
         error: connError,
       });
 
+      platformsReport[platform] = {
+        status: connError ? "FAILED" : messagesIngested > 0 ? "SYNCED" : "NO_CHANGES",
+        messagesIngested,
+        duplicates,
+        mode: "PULL_RECONCILED",
+        note: connError ? `Error: ${connError}` : messagesIngested > 0 ? `Synced ${messagesIngested} new message(s).` : "No new messages.",
+      };
+
       const durationMs = Date.now() - startedAt.getTime();
       console.log(
         `[RECONCILE][${reconciliationId}] platform=${platform} ` +
@@ -208,11 +258,12 @@ export async function POST(req: NextRequest) {
       startedAt: startedAt.toISOString(),
       completedAt: completedAt.toISOString(),
       durationMs: totalDurationMs,
+      platforms: platformsReport,
       connections: connectionResults,
       message:
         totalIngested > 0
           ? `Synced ${totalIngested} new message(s) from connected channels.`
-          : "All channels are up to date.",
+          : "All connected channels are up to date.",
     });
   } catch (err: any) {
     const durationMs = Date.now() - startedAt.getTime();
