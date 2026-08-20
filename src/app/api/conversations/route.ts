@@ -22,6 +22,10 @@ export async function GET(req: NextRequest) {
         status: "success",
         conversations: [],
         message: "Conversations are private to store owners.",
+      }, {
+        headers: {
+          "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
+        },
       });
     }
 
@@ -47,10 +51,16 @@ export async function GET(req: NextRequest) {
     if (sinceParam && deltaOnly) {
       const sinceDate = new Date(isNaN(Number(sinceParam)) ? sinceParam : Number(sinceParam));
       if (!isNaN(sinceDate.getTime())) {
+        // Apply 3-second safety overlap to eliminate clock skew or microsecond race conditions
+        const safeSinceDate = new Date(sinceDate.getTime() - 3000);
         const updatedCount = await prisma.conversation.count({
           where: {
             ...where,
-            updatedAt: { gt: sinceDate },
+            OR: [
+              { updatedAt: { gt: safeSinceDate } },
+              { createdAt: { gt: safeSinceDate } },
+              { lastMessageAt: { gt: safeSinceDate } },
+            ],
           },
         });
 
@@ -60,6 +70,10 @@ export async function GET(req: NextRequest) {
             hasUpdates: false,
             serverTimestamp,
             conversations: [],
+          }, {
+            headers: {
+              "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
+            },
           });
         }
       }
@@ -82,6 +96,10 @@ export async function GET(req: NextRequest) {
       hasUpdates: true,
       serverTimestamp,
       conversations,
+    }, {
+      headers: {
+        "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
+      },
     });
   } catch (error: any) {
     return NextResponse.json({ error: error.message }, { status: 500 });

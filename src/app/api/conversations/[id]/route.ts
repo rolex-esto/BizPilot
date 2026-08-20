@@ -28,10 +28,13 @@ export async function GET(req: NextRequest, { params }: { params: { id: string }
           return NextResponse.json({ error: "Conversation not found" }, { status: 404 });
         }
 
+        // Apply 3-second safety overlap window to eliminate clock drift or delayed transaction commits
+        const safeSinceDate = new Date(sinceDate.getTime() - 3000);
+
         const newMessages = await prisma.message.findMany({
           where: {
             conversationId,
-            sentAt: { gt: sinceDate },
+            sentAt: { gt: safeSinceDate },
           },
           orderBy: { sentAt: "asc" },
         });
@@ -42,6 +45,10 @@ export async function GET(req: NextRequest, { params }: { params: { id: string }
             hasUpdates: false,
             serverTimestamp,
             newMessages: [],
+          }, {
+            headers: {
+              "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
+            },
           });
         }
 
@@ -61,6 +68,10 @@ export async function GET(req: NextRequest, { params }: { params: { id: string }
           hasUpdates: true,
           serverTimestamp,
           newMessages,
+        }, {
+          headers: {
+            "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
+          },
         });
       }
     }

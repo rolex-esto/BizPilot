@@ -415,6 +415,8 @@ export default function UnifiedInboxPage() {
 
       const res = await fetch(`/api/conversations?${params.toString()}`, {
         signal: abortController.signal,
+        cache: "no-store",
+        headers: { "Cache-Control": "no-cache" },
       });
 
       if (abortController.signal.aborted) return;
@@ -433,13 +435,15 @@ export default function UnifiedInboxPage() {
         const freshConvs: Conversation[] = data.conversations || [];
         let activeConvHasUpdates = false;
 
-        // Check for new inbound messages
+        // Check for new inbound messages & brand new customer discovery
         if (initialLoadDoneRef.current) {
           freshConvs.forEach((conv) => {
             const currentMs = new Date(conv.lastMessageAt).getTime();
             const prevMs = knownTimestampsRef.current[conv.id];
+            const isBrandNewCustomer = prevMs === undefined;
+            const isExistingUpdated = prevMs !== undefined && currentMs > prevMs;
 
-            if (prevMs !== undefined && currentMs > prevMs) {
+            if (isBrandNewCustomer || isExistingUpdated) {
               if (conv.id === activeConvIdRef.current) {
                 activeConvHasUpdates = true;
               }
@@ -451,9 +455,9 @@ export default function UnifiedInboxPage() {
                 playNotificationChime();
                 setActiveToast({
                   id: `${conv.id}-${currentMs}`,
-                  name: conv.customer.name,
+                  name: conv.customer?.name || "Customer",
                   platform: conv.platform,
-                  preview: conv.lastMessagePreview || "Sent a new message",
+                  preview: conv.lastMessagePreview || (isBrandNewCustomer ? "New customer conversation" : "Sent a new message"),
                   convId: conv.id,
                 });
               }
@@ -461,14 +465,25 @@ export default function UnifiedInboxPage() {
           });
         }
 
-        const updatedTimestamps: Record<string, number> = {};
+        const updatedTimestamps: Record<string, number> = { ...knownTimestampsRef.current };
         freshConvs.forEach((c) => {
           updatedTimestamps[c.id] = new Date(c.lastMessageAt).getTime();
         });
         knownTimestampsRef.current = updatedTimestamps;
         initialLoadDoneRef.current = true;
 
-        setConversations(freshConvs);
+        // Deterministic immutable state merge to prevent dropping existing records during delta returns
+        setConversations((prevConvs) => {
+          if (!isBackgroundPoll || prevConvs.length === 0) {
+            return freshConvs;
+          }
+          const map = new Map<string, Conversation>();
+          prevConvs.forEach((c) => map.set(c.id, c));
+          freshConvs.forEach((c) => map.set(c.id, c));
+          return Array.from(map.values()).sort(
+            (a, b) => new Date(b.lastMessageAt).getTime() - new Date(a.lastMessageAt).getTime()
+          );
+        });
 
         // Pre-populate cache
         freshConvs.forEach((conv) => {
@@ -542,7 +557,11 @@ export default function UnifiedInboxPage() {
         url += `?since=${encodeURIComponent(since)}&deltaOnly=true`;
       }
 
-      const res = await fetch(url, { signal: abortController.signal });
+      const res = await fetch(url, {
+        signal: abortController.signal,
+        cache: "no-store",
+        headers: { "Cache-Control": "no-cache" },
+      });
 
       if (abortController.signal.aborted) return;
 
@@ -1041,9 +1060,9 @@ export default function UnifiedInboxPage() {
       }
     }
 
-    const handleVisibilityChange = () => {
-      if (!document.hidden) {
-        // Tab restored -> immediate delta sync
+    const handleWakeupSync = () => {
+      if (typeof document !== "undefined" && !document.hidden) {
+        // Tab restored / app focused / network restored -> immediate delta sync
         fetchConversations(true);
         if (activeConvIdRef.current) {
           fetchActiveConversation(activeConvIdRef.current, true);
@@ -1051,10 +1070,16 @@ export default function UnifiedInboxPage() {
       }
     };
 
-    document.addEventListener("visibilitychange", handleVisibilityChange);
+    document.addEventListener("visibilitychange", handleWakeupSync);
+    window.addEventListener("focus", handleWakeupSync);
+    window.addEventListener("pageshow", handleWakeupSync);
+    window.addEventListener("online", handleWakeupSync);
 
     return () => {
-      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      document.removeEventListener("visibilitychange", handleWakeupSync);
+      window.removeEventListener("focus", handleWakeupSync);
+      window.removeEventListener("pageshow", handleWakeupSync);
+      window.removeEventListener("online", handleWakeupSync);
       if (broadcastChannelRef.current) {
         broadcastChannelRef.current.close();
       }
@@ -1086,12 +1111,12 @@ export default function UnifiedInboxPage() {
     return () => clearInterval(chatInterval);
   }, [activeConvId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ─── Background Delta Polling for Conversations List ─────────────────────────
+  // ─── Background Delta Polling for Conversations List (2.0s interval) ─────────
   useEffect(() => {
     const listInterval = setInterval(() => {
       if (typeof document !== "undefined" && document.hidden) return;
       fetchConversations(true);
-    }, 3500);
+    }, 2000);
 
     return () => clearInterval(listInterval);
   }, [inboxMode, platformFilter, leadFilter]); // eslint-disable-line react-hooks/exhaustive-deps
