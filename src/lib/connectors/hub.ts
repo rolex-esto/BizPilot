@@ -4,6 +4,7 @@ import { AiClassifier } from "../ai/classifier";
 import { GroundedAiSuggestor } from "../ai/grounded-suggestor";
 import { TokenVault } from "./token-vault";
 import { SocialIdentityResolver, isFallbackCustomerName } from "./identity-resolver";
+import { RealtimeBroadcaster } from "../realtime/broadcaster";
 
 export interface IngestionResult {
   isDuplicate: boolean;
@@ -47,11 +48,7 @@ export class MessageHub {
     }
 
     if (!businessId) {
-      const defaultBiz = await prisma.business.findFirst();
-      if (!defaultBiz) {
-        throw new Error("No business profile found. Please seed or initialize the business database.");
-      }
-      businessId = defaultBiz.id;
+      throw new Error(`Routing rejected: No registered business or active PlatformConnection found for platform=${event.platform} accountId=${event.externalAccountId || "unknown"}`);
     }
 
     // 2. Idempotency Check: Prevent duplicate webhook message processing
@@ -314,6 +311,20 @@ export class MessageHub {
         lastMessagePreview: event.textContent.substring(0, 120),
         status: conversation.status === "OWNER_HANDLING" ? "OWNER_HANDLING" : "ACTIVE",
       },
+    });
+
+    // Broadcast event-driven realtime notification to active SSE listeners
+    RealtimeBroadcaster.broadcast({
+      type: "message.created",
+      businessId,
+      conversationId: conversation.id,
+      messageId: message.id,
+      platform: event.platform,
+      environment: environment as "LIVE" | "PRACTICE" | "TEST",
+      direction: event.direction,
+      preview: event.textContent.substring(0, 120),
+      senderName: customer.name || "Customer",
+      sentAt: (event.timestamp || new Date()).toISOString(),
     });
 
     return {

@@ -192,6 +192,7 @@ async function runFullQaSuite() {
   try {
     const idempotentKey = `idempotent_test_${Date.now()}`;
     const simEvent = DeveloperSimulator.createSimulatedEvent("FACEBOOK", "Idempotency Test User", "Checking idempotency", {
+      businessId,
       externalAccountId: "page_idem_01",
     });
     simEvent.externalMessageId = idempotentKey;
@@ -216,6 +217,14 @@ async function runFullQaSuite() {
     recordResult("STEP 7", "Idempotency: Deduplicate identical message sent 10 times", idempotencyPass, `DB count: ${dbMsgCount} (Expected: 1)`);
   } catch (err: any) {
     recordResult("STEP 7", "Idempotency", false, undefined, err.message);
+  } finally {
+    const idemCusts = await prisma.customer.findMany({ where: { name: "Idempotency Test User" } });
+    for (const c of idemCusts) {
+      await prisma.message.deleteMany({ where: { customerId: c.id } });
+      await prisma.conversation.deleteMany({ where: { customerId: c.id } });
+      await prisma.customerIdentityLink.deleteMany({ where: { customerId: c.id } });
+      await prisma.customer.delete({ where: { id: c.id } });
+    }
   }
 
   // ------------------------------------------------------------

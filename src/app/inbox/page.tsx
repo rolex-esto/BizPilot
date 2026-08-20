@@ -418,6 +418,62 @@ export default function UnifiedInboxPage() {
     }
   }, [activeConvId]);
 
+  // Event-Driven Real-time Stream (SSE) with Graceful Polling Fallback
+  useEffect(() => {
+    let eventSource: EventSource | null = null;
+
+    if (typeof window !== "undefined" && "EventSource" in window) {
+      try {
+        eventSource = new EventSource("/api/realtime");
+
+        eventSource.onmessage = (e) => {
+          try {
+            const event = JSON.parse(e.data);
+            if (event.type === "message.created") {
+              // Instantly refresh conversations list
+              fetchConversations();
+
+              // If event belongs to currently active conversation, refresh message stream immediately
+              if (activeConvId && event.conversationId === activeConvId) {
+                fetchActiveConversation(activeConvId);
+              }
+
+              // Play notification chime & trigger toast for incoming messages
+              if (event.direction === "INBOUND") {
+                playNotificationChime();
+                setActiveToast({
+                  id: event.conversationId,
+                  name: event.senderName || "Customer",
+                  platform: event.platform,
+                  preview: event.preview || "Sent a message",
+                  convId: event.conversationId,
+                });
+                if (typeof document !== "undefined") {
+                  document.title = "🔔 (1) New Message - BizPilot";
+                }
+              }
+            }
+          } catch {
+            // Heartbeat/ping ignore
+          }
+        };
+
+        eventSource.onerror = () => {
+          // Fallback interval polling continues seamlessly
+          eventSource?.close();
+        };
+      } catch {
+        // Fallback polling active
+      }
+    }
+
+    return () => {
+      if (eventSource) {
+        eventSource.close();
+      }
+    };
+  }, [activeConvId]);
+
   // Smooth auto-scroll to bottom whenever new messages arrive
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
