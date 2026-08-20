@@ -404,8 +404,22 @@ export class LivePlatformApiClient {
     }
 
     try {
+      const fetchToUse = this.config.fetchFn || globalThis.fetch;
       let endpoint = "";
       let payload: any = {};
+      let formDataBody: FormData | null = null;
+
+      // Extract binary data if mediaUrl is a Data URI
+      let binaryData: { buffer: Buffer; mimeType: string } | null = null;
+      if (mediaUrl && mediaUrl.startsWith("data:")) {
+        const match = mediaUrl.match(/^data:([^;]+);base64,(.*)$/);
+        if (match) {
+          binaryData = {
+            mimeType: match[1],
+            buffer: Buffer.from(match[2], "base64"),
+          };
+        }
+      }
 
       if (platform === "FACEBOOK") {
         endpoint = `${this.config.metaBaseUrl}/${this.config.graphApiVersion}/me/messages?access_token=${encodeURIComponent(rawToken)}`;
@@ -416,16 +430,38 @@ export class LivePlatformApiClient {
             AUDIO: "audio",
             DOCUMENT: "file",
           };
-          payload = {
-            recipient: { id: recipientExternalId },
-            messaging_type: "RESPONSE",
-            message: {
-              attachment: {
-                type: typeMap[mediaType] || "file",
-                payload: { url: mediaUrl, is_reusable: true },
+          const attachmentType = typeMap[mediaType] || "file";
+
+          if (binaryData) {
+            // Direct Binary File Upload via Multipart FormData (Supports Data URIs / Uploaded Files)
+            formDataBody = new FormData();
+            formDataBody.append("recipient", JSON.stringify({ id: recipientExternalId }));
+            formDataBody.append("messaging_type", "RESPONSE");
+            formDataBody.append(
+              "message",
+              JSON.stringify({
+                attachment: {
+                  type: attachmentType,
+                  payload: { is_reusable: true },
+                },
+              })
+            );
+            const blob = new Blob([new Uint8Array(binaryData.buffer)], { type: binaryData.mimeType });
+            const safeExt = attachmentType === "file" ? "pdf" : attachmentType === "image" ? "jpg" : attachmentType === "video" ? "mp4" : "mp3";
+            const safeName = filename || `file-${Date.now()}.${safeExt}`;
+            formDataBody.append("filedata", blob, safeName);
+          } else {
+            payload = {
+              recipient: { id: recipientExternalId },
+              messaging_type: "RESPONSE",
+              message: {
+                attachment: {
+                  type: attachmentType,
+                  payload: { url: mediaUrl, is_reusable: true },
+                },
               },
-            },
-          };
+            };
+          }
         } else {
           payload = {
             recipient: { id: recipientExternalId },
@@ -436,15 +472,34 @@ export class LivePlatformApiClient {
       } else if (platform === "INSTAGRAM") {
         endpoint = `${this.config.metaBaseUrl}/${this.config.graphApiVersion}/me/messages?access_token=${encodeURIComponent(rawToken)}`;
         if (mediaUrl && (mediaType === "IMAGE" || mediaType === "VIDEO")) {
-          payload = {
-            recipient: { id: recipientExternalId },
-            message: {
-              attachment: {
-                type: mediaType === "IMAGE" ? "image" : "video",
-                payload: { url: mediaUrl, is_reusable: true },
+          const attachmentType = mediaType === "IMAGE" ? "image" : "video";
+
+          if (binaryData) {
+            formDataBody = new FormData();
+            formDataBody.append("recipient", JSON.stringify({ id: recipientExternalId }));
+            formDataBody.append(
+              "message",
+              JSON.stringify({
+                attachment: {
+                  type: attachmentType,
+                  payload: { is_reusable: true },
+                },
+              })
+            );
+            const blob = new Blob([new Uint8Array(binaryData.buffer)], { type: binaryData.mimeType });
+            const safeName = filename || `media-${Date.now()}.${attachmentType === "image" ? "jpg" : "mp4"}`;
+            formDataBody.append("filedata", blob, safeName);
+          } else {
+            payload = {
+              recipient: { id: recipientExternalId },
+              message: {
+                attachment: {
+                  type: attachmentType,
+                  payload: { url: mediaUrl, is_reusable: true },
+                },
               },
-            },
-          };
+            };
+          }
         } else {
           payload = {
             recipient: { id: recipientExternalId },
@@ -454,10 +509,76 @@ export class LivePlatformApiClient {
         }
       } else if (platform === "WHATSAPP") {
         const phoneId = platformAccountId;
-        endpoint = `${this.config.metaBaseUrl}/${this.config.graphApiVersion}/${phoneId}/messages`;
         const to = recipientExternalId.replace("+", "").trim();
 
-        if (mediaUrl && mediaType) {
+        if (binaryData && mediaType) {
+          // WhatsApp Cloud API: Upload binary to /media first, then send via media id
+          const mediaUploadEndpoint = `${this.config.metaBaseUrl}/${this.config.graphApiVersion}/${phoneId}/media`;
+          const uploadForm = new FormData();
+          uploadForm.append("messaging_product", "whatsapp");
+          uploadForm.append("type", binaryData.mimeType);
+          const uploadBlob = new Blob([new Uint8Array(binaryData.buffer)], { type: binaryData.mimeType });
+          const safeName = filename || `file-${Date.now()}`;
+          uploadForm.append("file", uploadBlob, safeName);
+
+          const uploadRes = await fetchToUse(mediaUploadEndpoint, {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${rawToken}`,
+            },
+            body: uploadForm,
+          });
+          const uploadData = await uploadRes.json().catch(() => ({}));
+          if (!uploadRes.ok || !uploadData.id) {
+            const errObj = uploadData.error || {};
+            return {
+              success: false,
+              platform,
+              operation: "SEND_MESSAGE",
+              httpStatus: uploadRes.status,
+              latencyMs: Date.now() - startTime,
+              statusCategory: "REAL_API_FAIL",
+              errorMessage: errObj.message || `Failed to upload media to WhatsApp (HTTP ${uploadRes.status})`,
+            };
+          }
+
+          const mediaId = uploadData.id;
+          endpoint = `${this.config.metaBaseUrl}/${this.config.graphApiVersion}/${phoneId}/messages`;
+          if (mediaType === "IMAGE") {
+            payload = {
+              messaging_product: "whatsapp",
+              recipient_type: "individual",
+              to,
+              type: "image",
+              image: { id: mediaId, caption: textContent || undefined },
+            };
+          } else if (mediaType === "VIDEO") {
+            payload = {
+              messaging_product: "whatsapp",
+              recipient_type: "individual",
+              to,
+              type: "video",
+              video: { id: mediaId, caption: textContent || undefined },
+            };
+          } else if (mediaType === "AUDIO") {
+            payload = {
+              messaging_product: "whatsapp",
+              recipient_type: "individual",
+              to,
+              type: "audio",
+              audio: { id: mediaId },
+            };
+          } else if (mediaType === "DOCUMENT") {
+            payload = {
+              messaging_product: "whatsapp",
+              recipient_type: "individual",
+              to,
+              type: "document",
+              document: { id: mediaId, caption: textContent || undefined, filename: filename || "document.pdf" },
+            };
+          }
+        } else if (mediaUrl && mediaType) {
+          endpoint = `${this.config.metaBaseUrl}/${this.config.graphApiVersion}/${phoneId}/messages`;
           if (mediaType === "IMAGE") {
             payload = {
               messaging_product: "whatsapp",
@@ -492,6 +613,7 @@ export class LivePlatformApiClient {
             };
           }
         } else {
+          endpoint = `${this.config.metaBaseUrl}/${this.config.graphApiVersion}/${phoneId}/messages`;
           payload = {
             messaging_product: "whatsapp",
             recipient_type: "individual",
@@ -506,20 +628,22 @@ export class LivePlatformApiClient {
       const timeoutId = setTimeout(() => controller.abort(), this.config.timeoutMs);
 
       const headers: Record<string, string> = {
-        "Content-Type": "application/json",
         "Accept": "application/json",
       };
+
+      if (!formDataBody) {
+        headers["Content-Type"] = "application/json";
+      }
 
       if (platform === "WHATSAPP") {
         headers["Authorization"] = `Bearer ${rawToken}`;
       }
 
-      const fetchToUse = this.config.fetchFn || globalThis.fetch;
       const response = await fetchToUse(endpoint, {
         method: "POST",
         signal: controller.signal,
         headers,
-        body: JSON.stringify(payload),
+        body: formDataBody || JSON.stringify(payload),
       });
 
       clearTimeout(timeoutId);
