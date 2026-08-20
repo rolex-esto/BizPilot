@@ -167,6 +167,9 @@ export default function UnifiedInboxPage() {
   const knownTimestampsRef = useRef<Record<string, number>>({});
   const initialLoadDoneRef = useRef(false);
   const lastActiveMsgCountRef = useRef<Record<string, number>>({});
+  const isFetchingConvsRef = useRef(false);
+  const isFetchingActiveConvRef = useRef(false);
+  const isAutoReconcilingRef = useRef(false);
 
   // High-fidelity Web Audio API chime pop
   const playNotificationChime = () => {
@@ -249,6 +252,8 @@ export default function UnifiedInboxPage() {
   };
 
   const fetchConversations = async (targetMode?: "LIVE" | "PRACTICE") => {
+    if (isFetchingConvsRef.current) return;
+    isFetchingConvsRef.current = true;
     const currentMode = targetMode || inboxMode;
     try {
       const res = await fetch(`/api/conversations?environment=${currentMode}&platform=${platformFilter}&leadStatus=${leadFilter}`);
@@ -305,6 +310,7 @@ export default function UnifiedInboxPage() {
     } catch (err) {
       console.error("Error fetching conversations:", err);
     } finally {
+      isFetchingConvsRef.current = false;
       setLoading(false);
     }
   };
@@ -326,6 +332,8 @@ export default function UnifiedInboxPage() {
   };
 
   const fetchActiveConversation = async (id: string) => {
+    if (isFetchingActiveConvRef.current) return;
+    isFetchingActiveConvRef.current = true;
     try {
       const res = await fetch(`/api/conversations/${id}`);
       const data = await res.json();
@@ -348,6 +356,8 @@ export default function UnifiedInboxPage() {
       }
     } catch (err) {
       console.error("Error fetching conversation details:", err);
+    } finally {
+      isFetchingActiveConvRef.current = false;
     }
   };
 
@@ -445,10 +455,10 @@ export default function UnifiedInboxPage() {
     fetchConversations();
     fetchProducts();
 
-    // Auto-poll conversations every 3 seconds for real-time incoming messages
+    // Fast non-overlapping auto-sync interval (2.0s)
     const convInterval = setInterval(() => {
       fetchConversations();
-    }, 3000);
+    }, 2000);
 
     return () => clearInterval(convInterval);
   }, [inboxMode, platformFilter, leadFilter]);
@@ -462,14 +472,52 @@ export default function UnifiedInboxPage() {
         document.title = "BizPilot - Customer Messages";
       }
 
-      // Auto-poll the active chat thread every 2.5 seconds for instant real-time message stream
+      // Fast non-overlapping active chat thread stream (2.0s)
       const chatInterval = setInterval(() => {
         fetchActiveConversation(activeConvId);
-      }, 2500);
+      }, 2000);
 
       return () => clearInterval(chatInterval);
     }
   }, [activeConvId]);
+
+  // Background Self-Healing Graph API Auto-Reconciliation (LIVE Mode Only)
+  useEffect(() => {
+    if (inboxMode !== "LIVE") return;
+
+    const runAutoReconciliation = async () => {
+      if (isAutoReconcilingRef.current) return;
+      isAutoReconcilingRef.current = true;
+      try {
+        const res = await fetch("/api/channels/sync", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ background: true }),
+        });
+        const data = await res.json();
+        if (data.success && data.syncedCount > 0) {
+          console.log(`[AUTO-RECONCILE] Ingested ${data.syncedCount} new message(s) in background.`);
+          fetchConversations("LIVE");
+          if (activeConvId) {
+            fetchActiveConversation(activeConvId);
+          }
+        }
+      } catch (err) {
+        // Graceful silent fallback
+      } finally {
+        isAutoReconcilingRef.current = false;
+      }
+    };
+
+    // Run after 2.5s initially, then every 18s
+    const initialTimer = setTimeout(runAutoReconciliation, 2500);
+    const reconInterval = setInterval(runAutoReconciliation, 18000);
+
+    return () => {
+      clearTimeout(initialTimer);
+      clearInterval(reconInterval);
+    };
+  }, [inboxMode, activeConvId]);
 
   // Event-Driven Real-time Stream (SSE) with Graceful Polling Fallback
   useEffect(() => {

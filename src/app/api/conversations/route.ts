@@ -40,6 +40,31 @@ export async function GET(req: NextRequest) {
       where.customer = { leadStatus, environment };
     }
 
+    const sinceParam = searchParams.get("since");
+    const deltaOnly = searchParams.get("deltaOnly") === "true";
+    const serverTimestamp = new Date().toISOString();
+
+    if (sinceParam && deltaOnly) {
+      const sinceDate = new Date(isNaN(Number(sinceParam)) ? sinceParam : Number(sinceParam));
+      if (!isNaN(sinceDate.getTime())) {
+        const updatedCount = await prisma.conversation.count({
+          where: {
+            ...where,
+            updatedAt: { gt: sinceDate },
+          },
+        });
+
+        if (updatedCount === 0) {
+          return NextResponse.json({
+            status: "success",
+            hasUpdates: false,
+            serverTimestamp,
+            conversations: [],
+          });
+        }
+      }
+    }
+
     const conversations = await prisma.conversation.findMany({
       where,
       include: {
@@ -54,6 +79,8 @@ export async function GET(req: NextRequest) {
 
     return NextResponse.json({
       status: "success",
+      hasUpdates: true,
+      serverTimestamp,
       conversations,
     });
   } catch (error: any) {

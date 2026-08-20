@@ -33,30 +33,34 @@ export async function GET(req: NextRequest) {
  * POST Handler: Meta Webhook Ingestion (Facebook Messenger & Instagram)
  */
 export async function POST(req: NextRequest) {
-  console.log(`[FACEBOOK][WEBHOOK] method=POST received=true`);
+  const startTime = Date.now();
+  const correlationId = `meta_wh_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+  console.log(`[META][WEBHOOK][${correlationId}] method=POST received=true timestamp=${new Date().toISOString()}`);
+
   try {
     const rawBody = await req.text();
     const signature = req.headers.get("x-hub-signature-256");
 
-    console.log(`[FACEBOOK][WEBHOOK] signaturePresent=${Boolean(signature)}`);
+    console.log(`[META][WEBHOOK][${correlationId}] signaturePresent=${Boolean(signature)} bodyLength=${rawBody.length}`);
 
-    // Enforce HMAC signature verification whenever signature header is provided,
+    // Enforce HMAC signature verification strictly whenever signature header is provided,
     // or when running in production/staging environment.
     const isProductionOrStaging = process.env.NODE_ENV === "production" || process.env.APP_ENV === "staging";
     if (signature || isProductionOrStaging) {
       if (!signature) {
-        console.log(`[FACEBOOK][WEBHOOK] signatureValid=false (Missing signature header)`);
+        console.warn(`[META][WEBHOOK][${correlationId}] signatureValid=false (Missing signature header in production)`);
         return NextResponse.json({ error: "Missing x-hub-signature-256 header" }, { status: 401 });
       }
       const isValid = verifyMetaSignature(rawBody, signature, META_APP_SECRET);
-      console.log(`[FACEBOOK][WEBHOOK] signatureValid=${isValid}`);
+      console.log(`[META][WEBHOOK][${correlationId}] signatureValid=${isValid}`);
       if (!isValid) {
+        console.warn(`[META][WEBHOOK][${correlationId}] signatureValid=false (Cryptographic mismatch)`);
         return NextResponse.json({ error: "Invalid cryptographic signature" }, { status: 401 });
       }
     }
 
     const payload = JSON.parse(rawBody);
-    console.log(`[FACEBOOK][WEBHOOK] object=${payload.object} entryCount=${payload.entry?.length || 0}`);
+    console.log(`[META][WEBHOOK][${correlationId}] object=${payload.object} entryCount=${payload.entry?.length || 0}`);
 
     let events: import("@/lib/connectors/types").NormalizedMessageEvent[] = [];
     if (payload.object === "page") {
@@ -65,7 +69,7 @@ export async function POST(req: NextRequest) {
       events = InstagramConnector.parseWebhookPayload(payload);
     }
 
-    console.log(`[FACEBOOK][WEBHOOK] eventsParsed=${events.length}`);
+    console.log(`[META][WEBHOOK][${correlationId}] eventsParsed=${events.length}`);
 
     const ingestionResults = [];
     for (const ev of events) {
@@ -73,22 +77,28 @@ export async function POST(req: NextRequest) {
         ? `${ev.senderExternalId.substring(0, 3)}...${ev.senderExternalId.substring(ev.senderExternalId.length - 3)}`
         : "***";
 
-      console.log(`[FACEBOOK][WEBHOOK] pageId=${ev.externalAccountId} senderPsid=${redactedPsid} recipientPageId=${ev.externalAccountId} eventType=message`);
+      console.log(`[META][WEBHOOK][${correlationId}] platform=${ev.platform} pageId=${ev.externalAccountId} sender=${redactedPsid} direction=${ev.direction}`);
 
       ev.environment = "LIVE";
       ev.sourceType = ev.platform;
       const res = await MessageHub.ingestMessage(ev);
-      console.log(`[FACEBOOK][WEBHOOK] ingestResult isDuplicate=${res.isDuplicate} conversationId=${res.conversationId} messageId=${res.messageId}`);
+      console.log(`[META][WEBHOOK][${correlationId}] ingestResult isDuplicate=${res.isDuplicate} conversationId=${res.conversationId} messageId=${res.messageId}`);
       ingestionResults.push(res);
     }
 
+    const durationMs = Date.now() - startTime;
+    console.log(`[META][WEBHOOK][${correlationId}] completed=true durationMs=${durationMs} eventsProcessed=${events.length}`);
+
     return NextResponse.json({
       status: "success",
+      correlationId,
       eventsProcessed: events.length,
+      durationMs,
       results: ingestionResults,
     });
   } catch (error: any) {
-    console.error("[FACEBOOK][WEBHOOK] Error:", error);
-    return NextResponse.json({ error: error.message || "Internal server error" }, { status: 500 });
+    const durationMs = Date.now() - startTime;
+    console.error(`[META][WEBHOOK][${correlationId}] Error after ${durationMs}ms:`, error);
+    return NextResponse.json({ error: error.message || "Internal server error", correlationId }, { status: 500 });
   }
 }
