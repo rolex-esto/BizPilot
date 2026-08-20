@@ -35,8 +35,19 @@ import {
   Bell,
   ChevronDown,
   ChevronUp,
+  Image as ImageIcon,
+  Film,
+  Music,
+  Paperclip,
+  Maximize2,
+  Eye,
+  Download,
+  AlertCircle,
+  Camera,
+  FileText,
 } from "lucide-react";
 import { ModuleIntroModal, AboutPageButton, useModuleIntro, ModuleIntroConfig } from "@/components/ModuleIntroModal";
+import { getPlatformCapabilities, getPlatformMetadata } from "@/lib/connectors/registry";
 
 const INBOX_INTRO_CONFIG: ModuleIntroConfig = {
   moduleKey: "inbox",
@@ -125,6 +136,21 @@ export default function UnifiedInboxPage() {
   const [replyText, setReplyText] = useState("");
   const [sending, setSending] = useState(false);
   const [products, setProducts] = useState<Product[]>([]);
+
+  // Rich Media Composer & Lightbox State
+  const [stagedMedia, setStagedMedia] = useState<{
+    file?: File;
+    previewUrl: string;
+    mediaType: "IMAGE" | "VIDEO" | "AUDIO" | "DOCUMENT";
+    filename: string;
+  } | null>(null);
+  const [uploadingMedia, setUploadingMedia] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [lightboxMedia, setLightboxMedia] = useState<{
+    url: string;
+    title?: string;
+    type?: "IMAGE" | "VIDEO";
+  } | null>(null);
 
   // 1-Click Order Modal State
   const [showOrderModal, setShowOrderModal] = useState(false);
@@ -861,9 +887,54 @@ export default function UnifiedInboxPage() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [activeConv?.messages?.length, activeConvId, aiSuggestionMinimized]);
 
+  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setUploadingMedia(true);
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+
+      const res = await fetch("/api/upload", {
+        method: "POST",
+        body: formData,
+      });
+
+      const data = await res.json();
+      if (data.status === "success") {
+        setStagedMedia({
+          file,
+          previewUrl: data.url,
+          mediaType: data.mediaType,
+          filename: data.filename || file.name,
+        });
+      } else {
+        alert(data.error || "Failed to upload file");
+      }
+    } catch (err: any) {
+      console.error("Upload error:", err);
+      alert("Error uploading media file");
+    } finally {
+      setUploadingMedia(false);
+      if (fileInputRef.current) {
+        fileInputRef.current.value = "";
+      }
+    }
+  };
+
+  const triggerMediaUpload = (acceptType: string) => {
+    if (!fileInputRef.current) return;
+    fileInputRef.current.accept = acceptType;
+    fileInputRef.current.click();
+  };
+
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!replyText.trim() || !activeConvId) return;
+    const hasText = Boolean(replyText.trim());
+    const hasMedia = Boolean(stagedMedia?.previewUrl);
+
+    if ((!hasText && !hasMedia) || !activeConvId) return;
 
     setSending(true);
     try {
@@ -872,17 +943,21 @@ export default function UnifiedInboxPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           conversationId: activeConvId,
-          textContent: replyText,
+          textContent: replyText.trim(),
+          mediaUrl: stagedMedia?.previewUrl,
+          mediaType: stagedMedia?.mediaType,
+          filename: stagedMedia?.filename,
         }),
       });
 
       const data = await res.json();
       if (data.status === "success") {
         setReplyText("");
+        setStagedMedia(null);
         fetchActiveConversation(activeConvId);
         fetchConversations();
       } else {
-        alert(data.error || "Failed to send message");
+        alert(data.error || data.message || "Failed to send message");
       }
     } catch (err) {
       console.error("Error sending message:", err);
@@ -1337,6 +1412,122 @@ export default function UnifiedInboxPage() {
                             : "bg-sky-600 text-white rounded-br-xs"
                         }`}
                       >
+                        {/* Rich Media Previews (Image, Video, Audio, Document, Location, Sticker) */}
+                        {(() => {
+                          const mediaUrl = msg.mediaUrl;
+                          let mediaType = (msg.mediaType || "").toUpperCase();
+                          let parsedPayload: any = {};
+                          if (msg.rawPayload) {
+                            try {
+                              parsedPayload = typeof msg.rawPayload === "string" ? JSON.parse(msg.rawPayload) : msg.rawPayload;
+                              if (!mediaType && parsedPayload.messageType) {
+                                mediaType = parsedPayload.messageType;
+                              }
+                            } catch {}
+                          }
+
+                          if (!mediaUrl && !parsedPayload.locationMetadata) return null;
+
+                          if (mediaUrl && (mediaType === "IMAGE" || /\.(jpg|jpeg|png|webp|gif)($|\?)/i.test(mediaUrl))) {
+                            const imgUrl: string = mediaUrl;
+                            return (
+                              <div className="mb-2 relative group overflow-hidden rounded-xl border border-slate-200/60 bg-black/5">
+                                <img
+                                  src={imgUrl}
+                                  alt="Attachment"
+                                  onClick={() => setLightboxMedia({ url: imgUrl, title: isCustomer ? activeConv.customer.name : "Store Owner", type: "IMAGE" })}
+                                  className="max-h-64 max-w-full rounded-xl object-cover cursor-zoom-in transition-transform duration-200 group-hover:scale-102"
+                                  onError={(e) => {
+                                    (e.target as HTMLElement).style.display = "none";
+                                  }}
+                                />
+                                <button
+                                  type="button"
+                                  onClick={() => setLightboxMedia({ url: imgUrl, title: isCustomer ? activeConv.customer.name : "Store Owner", type: "IMAGE" })}
+                                  className="absolute bottom-2 right-2 bg-black/60 hover:bg-black/80 text-white p-1 rounded-md opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1 text-[10px] font-bold px-1.5"
+                                >
+                                  <Maximize2 className="w-3 h-3" />
+                                  Full View
+                                </button>
+                              </div>
+                            );
+                          }
+
+                          if (mediaType === "VIDEO" || (mediaUrl && /\.(mp4|webm|mov)($|\?)/i.test(mediaUrl))) {
+                            return (
+                              <div className="mb-2 overflow-hidden rounded-xl border border-slate-200/60 bg-black">
+                                <video
+                                  src={mediaUrl}
+                                  controls
+                                  preload="metadata"
+                                  className="max-h-64 w-full rounded-xl"
+                                />
+                              </div>
+                            );
+                          }
+
+                          if (mediaType === "AUDIO" || (mediaUrl && /\.(mp3|ogg|wav|m4a|aac)($|\?)/i.test(mediaUrl))) {
+                            return (
+                              <div className="mb-2 p-2 bg-white/10 rounded-xl border border-white/20">
+                                <div className="flex items-center gap-1.5 mb-1 text-[11px] font-bold">
+                                  <Music className="w-3.5 h-3.5" />
+                                  <span>Voice / Audio Message</span>
+                                </div>
+                                <audio src={mediaUrl} controls className="w-full h-8" />
+                              </div>
+                            );
+                          }
+
+                          if (mediaType === "DOCUMENT" || (mediaUrl && /\.(pdf|doc|docx|txt)($|\?)/i.test(mediaUrl))) {
+                            const filename = parsedPayload.mediaMetadata?.filename || parsedPayload.filename || "Attached Document";
+                            return (
+                              <div className="mb-2 p-2.5 bg-slate-100 dark:bg-white/10 rounded-xl border border-slate-200/80 flex items-center justify-between gap-3 text-slate-800 dark:text-white">
+                                <div className="flex items-center gap-2 min-w-0">
+                                  <FileText className="w-5 h-5 text-sky-600 shrink-0" />
+                                  <div className="min-w-0">
+                                    <p className="font-bold text-xs truncate">{filename}</p>
+                                    <p className="text-[10px] text-slate-500 dark:text-slate-300">Document Attachment</p>
+                                  </div>
+                                </div>
+                                <a
+                                  href={`/api/media/proxy?messageId=${msg.id}`}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="px-2.5 py-1 bg-sky-600 hover:bg-sky-700 text-white rounded-lg text-[10px] font-bold inline-flex items-center gap-1 shrink-0 shadow-2xs"
+                                >
+                                  <Download className="w-3 h-3" />
+                                  View
+                                </a>
+                              </div>
+                            );
+                          }
+
+                          if (parsedPayload.locationMetadata) {
+                            const loc = parsedPayload.locationMetadata;
+                            return (
+                              <div className="mb-2 p-2.5 bg-emerald-50 text-emerald-950 rounded-xl border border-emerald-200">
+                                <div className="flex items-center gap-1.5 font-bold text-xs mb-1">
+                                  <MapPin className="w-4 h-4 text-emerald-600" />
+                                  <span>{loc.name || "Shared Location"}</span>
+                                </div>
+                                {loc.address && <p className="text-[11px] text-slate-600 mb-1.5">{loc.address}</p>}
+                                <a
+                                  href={`https://www.google.com/maps/search/?api=1&query=${loc.latitude},${loc.longitude}`}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="text-[10px] font-bold text-emerald-700 hover:underline inline-flex items-center gap-1"
+                                >
+                                  <ExternalLink className="w-3 h-3" />
+                                  Open in Google Maps
+                                </a>
+                              </div>
+                            );
+                          }
+
+                          return null;
+                        })()}
+
+                        {/* Text message content */}
                         {msg.textContent}
 
                         {isCustomer && msg.aiClassification && (
@@ -1494,19 +1685,113 @@ export default function UnifiedInboxPage() {
                 </div>
               </div>
 
-              {/* Reply Input Box */}
+              {/* Reply Input Box & Multi-Type Media Attachment */}
               <form onSubmit={handleSendMessage} className="p-3 border-t border-slate-200 bg-white">
+                {/* Staged Media Attachment Preview */}
+                {stagedMedia && (
+                  <div className="mb-2 p-2 bg-sky-50 border border-sky-200 rounded-xl flex items-center justify-between gap-3 animate-in fade-in">
+                    <div className="flex items-center gap-2 min-w-0">
+                      {stagedMedia.mediaType === "IMAGE" ? (
+                        <img src={stagedMedia.previewUrl} alt="Staged" className="w-10 h-10 object-cover rounded-lg border border-sky-300 shrink-0" />
+                      ) : stagedMedia.mediaType === "VIDEO" ? (
+                        <div className="w-10 h-10 bg-slate-900 text-white flex items-center justify-center rounded-lg shrink-0">
+                          <Film className="w-5 h-5 text-sky-400" />
+                        </div>
+                      ) : (
+                        <div className="w-10 h-10 bg-sky-100 text-sky-700 flex items-center justify-center rounded-lg shrink-0">
+                          <FileText className="w-5 h-5 text-sky-600" />
+                        </div>
+                      )}
+                      <div className="min-w-0">
+                        <p className="text-xs font-bold text-slate-800 truncate">{stagedMedia.filename}</p>
+                        <p className="text-[10px] text-sky-700 font-medium">{stagedMedia.mediaType} ready to send</p>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setStagedMedia(null)}
+                      className="p-1 text-slate-400 hover:text-slate-700 rounded-lg hover:bg-sky-100"
+                      title="Remove attachment"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                )}
+
+                {/* Hidden Multi-Type File Input */}
+                <input
+                  type="file"
+                  ref={fileInputRef}
+                  onChange={handleFileSelect}
+                  className="hidden"
+                />
+
                 <div className="flex items-end gap-2">
+                  {/* Dynamic Capability-Driven Media Action Buttons */}
+                  {(() => {
+                    const caps = getPlatformCapabilities(activeConv.platform);
+                    return (
+                      <div className="flex items-center gap-1 pb-1">
+                        {/* Attach Photo Button */}
+                        <button
+                          type="button"
+                          onClick={() => triggerMediaUpload("image/jpeg,image/png,image/webp,image/gif")}
+                          disabled={uploadingMedia || !caps.outbound.image}
+                          title={caps.outbound.image ? "Attach photo / image" : `Image sending not supported on ${activeConv.platform}`}
+                          className={`p-2 rounded-xl transition-colors ${
+                            caps.outbound.image
+                              ? "text-slate-500 hover:text-sky-600 hover:bg-sky-50 border border-slate-200"
+                              : "text-slate-300 border border-slate-100 cursor-not-allowed opacity-50"
+                          }`}
+                        >
+                          <Camera className="w-4 h-4" />
+                        </button>
+
+                        {/* Attach Video Button */}
+                        <button
+                          type="button"
+                          onClick={() => triggerMediaUpload("video/mp4,video/webm,video/quicktime")}
+                          disabled={uploadingMedia || !caps.outbound.video}
+                          title={caps.outbound.video ? "Attach video" : `Video sending not supported on ${activeConv.platform}`}
+                          className={`p-2 rounded-xl transition-colors ${
+                            caps.outbound.video
+                              ? "text-slate-500 hover:text-sky-600 hover:bg-sky-50 border border-slate-200"
+                              : "text-slate-300 border border-slate-100 cursor-not-allowed opacity-50"
+                          }`}
+                        >
+                          <Film className="w-4 h-4" />
+                        </button>
+
+                        {/* Attach File Button */}
+                        <button
+                          type="button"
+                          onClick={() => triggerMediaUpload("application/pdf,application/msword,text/plain")}
+                          disabled={uploadingMedia || !caps.outbound.document}
+                          title={caps.outbound.document ? "Attach document" : `Document sending not supported on ${activeConv.platform}`}
+                          className={`p-2 rounded-xl transition-colors ${
+                            caps.outbound.document
+                              ? "text-slate-500 hover:text-sky-600 hover:bg-sky-50 border border-slate-200"
+                              : "text-slate-300 border border-slate-100 cursor-not-allowed opacity-50"
+                          }`}
+                        >
+                          <Paperclip className="w-4 h-4" />
+                        </button>
+                      </div>
+                    );
+                  })()}
+
                   <textarea
                     rows={2}
-                    placeholder="Type your response to the buyer..."
+                    placeholder={uploadingMedia ? "Uploading attachment..." : "Type your response to the buyer..."}
                     value={replyText}
                     onChange={(e) => setReplyText(e.target.value)}
-                    className="flex-1 text-xs p-2.5 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-sky-500 resize-none"
+                    disabled={uploadingMedia}
+                    className="flex-1 text-xs p-2.5 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-sky-500 resize-none disabled:bg-slate-50"
                   />
+
                   <button
                     type="submit"
-                    disabled={sending || !replyText.trim()}
+                    disabled={sending || uploadingMedia || (!replyText.trim() && !stagedMedia)}
                     className="p-2.5 bg-sky-600 hover:bg-sky-700 text-white rounded-xl font-bold transition-colors disabled:opacity-50 shrink-0"
                   >
                     <Send className="w-4 h-4" />
@@ -1877,6 +2162,53 @@ export default function UnifiedInboxPage() {
               <MessageSquare className="w-3.5 h-3.5" />
               Open Chat
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* Full-Screen Media Lightbox Modal */}
+      {lightboxMedia && (
+        <div className="fixed inset-0 z-50 bg-black/90 backdrop-blur-md flex items-center justify-center p-4 animate-in fade-in duration-200">
+          <div className="relative max-w-4xl max-h-[90vh] flex flex-col items-center">
+            <div className="w-full flex items-center justify-between text-white mb-2 px-1">
+              <span className="text-xs font-bold text-slate-300">
+                {lightboxMedia.title || "Photo Preview"}
+              </span>
+              <div className="flex items-center gap-2">
+                <a
+                  href={lightboxMedia.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  download
+                  className="p-1.5 bg-white/10 hover:bg-white/20 rounded-lg text-white text-xs font-bold flex items-center gap-1 transition-colors"
+                  title="Open original"
+                >
+                  <Download className="w-4 h-4" />
+                </a>
+                <button
+                  type="button"
+                  onClick={() => setLightboxMedia(null)}
+                  className="p-1.5 bg-white/10 hover:bg-white/20 rounded-lg text-white transition-colors"
+                  title="Close preview"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+            {lightboxMedia.type === "VIDEO" ? (
+              <video
+                src={lightboxMedia.url}
+                controls
+                autoPlay
+                className="max-h-[80vh] max-w-full rounded-2xl shadow-2xl border border-white/10"
+              />
+            ) : (
+              <img
+                src={lightboxMedia.url}
+                alt="Full preview"
+                className="max-h-[80vh] max-w-full rounded-2xl shadow-2xl object-contain border border-white/10"
+              />
+            )}
           </div>
         </div>
       )}

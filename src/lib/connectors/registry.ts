@@ -7,6 +7,11 @@
  */
 
 import { PlanTier } from "../plans";
+import { FacebookMessengerConnector } from "./facebook";
+import { InstagramConnector } from "./instagram";
+import { WhatsAppConnector } from "./whatsapp";
+import { TikTokConnector } from "./tiktok";
+import { GranularPlatformCapabilities } from "./types";
 
 export type PlatformId =
   | "FACEBOOK"
@@ -37,13 +42,7 @@ export interface PlatformMetadata {
   multiAccountSupported: boolean;
   approvalRequired: boolean;
   approvalStatus: "AVAILABLE" | "PENDING_ENTERPRISE_REVIEW" | "UPCOMING";
-  capabilities: {
-    messaging: boolean;
-    webhooks: boolean;
-    quickReplies: boolean;
-    mediaSupport: boolean;
-    signatureVerification: boolean;
-  };
+  capabilities: GranularPlatformCapabilities;
   requiredPermissions: string[];
   privacyNotes: string;
 }
@@ -59,13 +58,7 @@ export const PLATFORM_REGISTRY: Record<PlatformId, PlatformMetadata> = {
     multiAccountSupported: true,
     approvalRequired: false,
     approvalStatus: "AVAILABLE",
-    capabilities: {
-      messaging: true,
-      webhooks: true,
-      quickReplies: true,
-      mediaSupport: true,
-      signatureVerification: true,
-    },
+    capabilities: FacebookMessengerConnector.capabilities,
     requiredPermissions: ["pages_messaging", "pages_show_list", "pages_read_engagement"],
     privacyNotes: "Only authorized messages sent directly to connected Business Pages are ingested. Unrelated personal messages are never accessed.",
   },
@@ -79,13 +72,7 @@ export const PLATFORM_REGISTRY: Record<PlatformId, PlatformMetadata> = {
     multiAccountSupported: true,
     approvalRequired: false,
     approvalStatus: "AVAILABLE",
-    capabilities: {
-      messaging: true,
-      webhooks: true,
-      quickReplies: true,
-      mediaSupport: true,
-      signatureVerification: true,
-    },
+    capabilities: InstagramConnector.capabilities,
     requiredPermissions: ["instagram_manage_messages", "pages_manage_metadata"],
     privacyNotes: "Only DMs sent to connected Professional accounts are ingested. Personal Instagram accounts are not monitored.",
   },
@@ -99,13 +86,7 @@ export const PLATFORM_REGISTRY: Record<PlatformId, PlatformMetadata> = {
     multiAccountSupported: true,
     approvalRequired: false,
     approvalStatus: "AVAILABLE",
-    capabilities: {
-      messaging: true,
-      webhooks: true,
-      quickReplies: true,
-      mediaSupport: true,
-      signatureVerification: true,
-    },
+    capabilities: WhatsAppConnector.capabilities,
     requiredPermissions: ["whatsapp_business_messaging", "whatsapp_business_management"],
     privacyNotes: "Only conversations directed to the verified WhatsApp Business Account (WABA) are ingested.",
   },
@@ -119,13 +100,7 @@ export const PLATFORM_REGISTRY: Record<PlatformId, PlatformMetadata> = {
     multiAccountSupported: true,
     approvalRequired: true,
     approvalStatus: "PENDING_ENTERPRISE_REVIEW",
-    capabilities: {
-      messaging: true,
-      webhooks: true,
-      quickReplies: false,
-      mediaSupport: false,
-      signatureVerification: true,
-    },
+    capabilities: TikTokConnector.capabilities,
     requiredPermissions: ["business.message.read", "business.message.write"],
     privacyNotes: "TikTok Business Messaging requires enterprise partner verification by ByteDance. Personal accounts cannot be connected.",
   },
@@ -142,9 +117,15 @@ export const PLATFORM_REGISTRY: Record<PlatformId, PlatformMetadata> = {
     capabilities: {
       messaging: true,
       webhooks: true,
-      quickReplies: true,
-      mediaSupport: true,
       signatureVerification: true,
+      rateLimitPerMinute: 120,
+      requiresAppReview: false,
+      productionReady: false,
+      statusNotes: "Upcoming integration via Telegram Bot API.",
+      inbound: { text: true, image: true, video: true, audio: true, document: true, sticker: true, location: true },
+      outbound: { text: true, image: true, video: true, audio: true, document: true },
+      reconciliation: false,
+      reconciliationNotes: "Webhook-based Bot API updates.",
     },
     requiredPermissions: ["bot_api_token"],
     privacyNotes: "Only conversations routed to the registered Bot are processed.",
@@ -162,9 +143,15 @@ export const PLATFORM_REGISTRY: Record<PlatformId, PlatformMetadata> = {
     capabilities: {
       messaging: true,
       webhooks: true,
-      quickReplies: true,
-      mediaSupport: true,
       signatureVerification: true,
+      rateLimitPerMinute: 60,
+      requiresAppReview: true,
+      productionReady: false,
+      statusNotes: "Upcoming integration via Viber Commercial Messages.",
+      inbound: { text: true, image: true, video: true, audio: false, document: true, sticker: false, location: false },
+      outbound: { text: true, image: true, video: false, audio: false, document: false },
+      reconciliation: false,
+      reconciliationNotes: "Webhook-based message delivery.",
     },
     requiredPermissions: ["viber_bot_auth"],
     privacyNotes: "Viber commercial messaging account required.",
@@ -182,9 +169,15 @@ export const PLATFORM_REGISTRY: Record<PlatformId, PlatformMetadata> = {
     capabilities: {
       messaging: true,
       webhooks: true,
-      quickReplies: false,
-      mediaSupport: false,
       signatureVerification: true,
+      rateLimitPerMinute: 60,
+      requiresAppReview: true,
+      productionReady: false,
+      statusNotes: "Upcoming integration via Shopee Open Platform.",
+      inbound: { text: true, image: true, video: false, audio: false, document: false, sticker: false, location: false },
+      outbound: { text: true, image: true, video: false, audio: false, document: false },
+      reconciliation: true,
+      reconciliationNotes: "Periodic chat pull sync via Open Platform token.",
     },
     requiredPermissions: ["shopee_seller_auth"],
     privacyNotes: "Store-level marketplace token required.",
@@ -202,9 +195,15 @@ export const PLATFORM_REGISTRY: Record<PlatformId, PlatformMetadata> = {
     capabilities: {
       messaging: true,
       webhooks: true,
-      quickReplies: false,
-      mediaSupport: false,
       signatureVerification: true,
+      rateLimitPerMinute: 60,
+      requiresAppReview: true,
+      productionReady: false,
+      statusNotes: "Upcoming integration via Lazada Open Platform.",
+      inbound: { text: true, image: true, video: false, audio: false, document: false, sticker: false, location: false },
+      outbound: { text: true, image: true, video: false, audio: false, document: false },
+      reconciliation: true,
+      reconciliationNotes: "Periodic chat pull sync via Open Platform token.",
     },
     requiredPermissions: ["lazada_seller_auth"],
     privacyNotes: "Seller authorization required.",
@@ -217,6 +216,30 @@ export const PLATFORM_REGISTRY: Record<PlatformId, PlatformMetadata> = {
 export function getPlatformMetadata(platform: string): PlatformMetadata | null {
   const key = platform.toUpperCase() as PlatformId;
   return PLATFORM_REGISTRY[key] || null;
+}
+
+/**
+ * Get granular capabilities for a platform
+ */
+export function getPlatformCapabilities(platform: string): GranularPlatformCapabilities {
+  const meta = getPlatformMetadata(platform);
+  if (meta?.capabilities) {
+    return meta.capabilities;
+  }
+  // Safe default fallback for unknown/manual platforms
+  return {
+    messaging: true,
+    webhooks: false,
+    signatureVerification: false,
+    rateLimitPerMinute: 60,
+    requiresAppReview: false,
+    productionReady: false,
+    statusNotes: "Custom / Manual Platform",
+    inbound: { text: true, image: false, video: false, audio: false, document: false, sticker: false, location: false },
+    outbound: { text: true, image: false, video: false, audio: false, document: false },
+    reconciliation: false,
+    reconciliationNotes: "Manual entry only.",
+  };
 }
 
 /**

@@ -346,16 +346,26 @@ export class LivePlatformApiClient {
   }
 
   /**
-   * Dispatches an outbound message to the official platform API.
+   * Dispatches an outbound message (text or media) to the official platform API.
    */
   public async sendOutboundMessage(
     platform: SupportedPlatform,
     rawToken: string | null | undefined,
     platformAccountId: string,
     recipientExternalId: string,
-    textContent: string
+    contentOrText: string | {
+      text?: string;
+      mediaUrl?: string;
+      mediaType?: "IMAGE" | "VIDEO" | "AUDIO" | "DOCUMENT";
+      filename?: string;
+    }
   ): Promise<LiveApiResult> {
     const startTime = Date.now();
+    const content = typeof contentOrText === "string" ? { text: contentOrText } : contentOrText;
+    const textContent = content.text || "";
+    const mediaUrl = content.mediaUrl;
+    const mediaType = content.mediaType;
+    const filename = content.filename;
 
     if (!rawToken || rawToken.trim() === "" || rawToken.startsWith("sim_") || rawToken === "none") {
       return {
@@ -379,27 +389,117 @@ export class LivePlatformApiClient {
       };
     }
 
+    // Capability Validation: Check if the platform actually supports the outbound media type
+    if (mediaType) {
+      if (platform === "INSTAGRAM" && (mediaType === "DOCUMENT" || mediaType === "AUDIO")) {
+        return {
+          success: false,
+          platform,
+          operation: "SEND_MESSAGE",
+          latencyMs: Date.now() - startTime,
+          statusCategory: "BLOCKED",
+          errorMessage: `Instagram Messaging API does not support outbound ${mediaType.toLowerCase()} attachments.`,
+        };
+      }
+    }
+
     try {
       let endpoint = "";
       let payload: any = {};
 
-      if (platform === "FACEBOOK" || platform === "INSTAGRAM") {
+      if (platform === "FACEBOOK") {
         endpoint = `${this.config.metaBaseUrl}/${this.config.graphApiVersion}/me/messages?access_token=${encodeURIComponent(rawToken)}`;
-        payload = {
-          recipient: { id: recipientExternalId },
-          messaging_type: "RESPONSE",
-          message: { text: textContent },
-        };
+        if (mediaUrl && mediaType) {
+          const typeMap: Record<string, string> = {
+            IMAGE: "image",
+            VIDEO: "video",
+            AUDIO: "audio",
+            DOCUMENT: "file",
+          };
+          payload = {
+            recipient: { id: recipientExternalId },
+            messaging_type: "RESPONSE",
+            message: {
+              attachment: {
+                type: typeMap[mediaType] || "file",
+                payload: { url: mediaUrl, is_reusable: true },
+              },
+            },
+          };
+        } else {
+          payload = {
+            recipient: { id: recipientExternalId },
+            messaging_type: "RESPONSE",
+            message: { text: textContent },
+          };
+        }
+      } else if (platform === "INSTAGRAM") {
+        endpoint = `${this.config.metaBaseUrl}/${this.config.graphApiVersion}/me/messages?access_token=${encodeURIComponent(rawToken)}`;
+        if (mediaUrl && (mediaType === "IMAGE" || mediaType === "VIDEO")) {
+          payload = {
+            recipient: { id: recipientExternalId },
+            message: {
+              attachment: {
+                type: mediaType === "IMAGE" ? "image" : "video",
+                payload: { url: mediaUrl, is_reusable: true },
+              },
+            },
+          };
+        } else {
+          payload = {
+            recipient: { id: recipientExternalId },
+            messaging_type: "RESPONSE",
+            message: { text: textContent },
+          };
+        }
       } else if (platform === "WHATSAPP") {
         const phoneId = platformAccountId;
         endpoint = `${this.config.metaBaseUrl}/${this.config.graphApiVersion}/${phoneId}/messages`;
-        payload = {
-          messaging_product: "whatsapp",
-          recipient_type: "individual",
-          to: recipientExternalId.replace("+", "").trim(),
-          type: "text",
-          text: { body: textContent },
-        };
+        const to = recipientExternalId.replace("+", "").trim();
+
+        if (mediaUrl && mediaType) {
+          if (mediaType === "IMAGE") {
+            payload = {
+              messaging_product: "whatsapp",
+              recipient_type: "individual",
+              to,
+              type: "image",
+              image: { link: mediaUrl, caption: textContent || undefined },
+            };
+          } else if (mediaType === "VIDEO") {
+            payload = {
+              messaging_product: "whatsapp",
+              recipient_type: "individual",
+              to,
+              type: "video",
+              video: { link: mediaUrl, caption: textContent || undefined },
+            };
+          } else if (mediaType === "AUDIO") {
+            payload = {
+              messaging_product: "whatsapp",
+              recipient_type: "individual",
+              to,
+              type: "audio",
+              audio: { link: mediaUrl },
+            };
+          } else if (mediaType === "DOCUMENT") {
+            payload = {
+              messaging_product: "whatsapp",
+              recipient_type: "individual",
+              to,
+              type: "document",
+              document: { link: mediaUrl, caption: textContent || undefined, filename: filename || "document.pdf" },
+            };
+          }
+        } else {
+          payload = {
+            messaging_product: "whatsapp",
+            recipient_type: "individual",
+            to,
+            type: "text",
+            text: { body: textContent },
+          };
+        }
       }
 
       const controller = new AbortController();

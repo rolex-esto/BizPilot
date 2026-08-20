@@ -4,14 +4,14 @@ import { requireBusinessAuth } from "@/lib/auth/api-guard";
 import { TokenVault } from "@/lib/connectors/token-vault";
 import { LivePlatformApiClient } from "@/lib/connectors/live-client";
 import { MessageHub } from "@/lib/connectors/hub";
-import { SupportedPlatform } from "@/lib/connectors/types";
+import { SupportedPlatform, getCanonicalExternalThreadId } from "@/lib/connectors/types";
 
 export const dynamic = "force-dynamic";
 
 /**
  * POST /api/channels/sync
  *
- * INCREMENTAL pull sync from Meta Graph API for connected Facebook/Instagram accounts.
+ * Universal platform-agnostic pull sync engine for connected social & messaging accounts.
  *
  * Key design principles:
  * 1. BOUNDED: Uses PlatformConnection.lastSyncAt as the since-cursor with a 5-min
@@ -19,12 +19,12 @@ export const dynamic = "force-dynamic";
  *    window when lastSyncAt is null (first sync).
  * 2. CURSOR ADVANCE: lastSyncAt is updated ONLY after successful processing of all
  *    fetched messages. A failure leaves the cursor unchanged so the next run retries.
- * 3. INBOUND-ONLY: fetchRecentPageMessages now skips OUTBOUND echo messages, so
- *    no "Store Owner" customer can be fabricated here.
- * 4. THREAD ID CONSISTENCY: externalThreadId uses the same "fb_thread_{psid}" format
- *    as the Facebook webhook parser (facebook.ts) so webhook and reconciliation always
- *    route to the exact same Conversation row.
- * 5. TELEMETRY: Structured reconciliation log per connection.
+ * 3. INBOUND-ONLY: fetchRecentPageMessages skips OUTBOUND echo messages to prevent
+ *    fabricating a "Store Owner" customer.
+ * 4. THREAD ID CONSISTENCY: externalThreadId uses canonical getCanonicalExternalThreadId.
+ * 5. PLATFORM AWARENESS: Distinguishes pull-capable platforms (Facebook, Instagram) from
+ *    webhook-first platforms (WhatsApp Cloud API).
+ * 6. TELEMETRY: Structured reconciliation log per connection.
  */
 export async function POST(req: NextRequest) {
   const reconciliationId = `rec_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
@@ -37,16 +37,13 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Unauthorized access." }, { status: 401 });
     }
 
-    // The `background: true` flag suppresses non-critical error responses so that
-    // the client-side auto-reconciliation loop does not treat routine "no new messages"
-    // results as failures.
     const body = await req.json().catch(() => ({}));
     const isBackground = body?.background === true;
 
     const connections = await prisma.platformConnection.findMany({
       where: {
         businessId,
-        platform: { in: ["FACEBOOK", "INSTAGRAM"] },
+        platform: { in: ["FACEBOOK", "INSTAGRAM", "WHATSAPP", "TIKTOK"] },
         status: "CONNECTED",
       },
     });
@@ -55,7 +52,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({
         success: false,
         syncedCount: 0,
-        message: "No connected Facebook or Instagram accounts found.",
+        message: "No connected social messaging accounts found.",
       });
     }
 
@@ -69,27 +66,52 @@ export async function POST(req: NextRequest) {
       messagesIngested: number;
       duplicates: number;
       pagesFetched: number;
+      statusNote?: string;
       error?: string;
     }> = [];
 
     for (const conn of connections) {
+      const platform = conn.platform as SupportedPlatform;
+      const checkpointBefore = conn.lastSyncAt?.toISOString() ?? null;
+
+      // WhatsApp Cloud API & TikTok are push-webhook first architectures
+      if (platform === "WHATSAPP") {
+        connectionResults.push({
+          platform,
+          checkpointBefore,
+          checkpointAfter: checkpointBefore,
+          messagesFetched: 0,
+          messagesIngested: 0,
+          duplicates: 0,
+          pagesFetched: 0,
+          statusNote: "WEBHOOK_PUSH_ACTIVE (WhatsApp Cloud API receives live webhooks; pull reconciliation is not provided by Meta WABA API)",
+        });
+        continue;
+      }
+
+      if (platform === "TIKTOK") {
+        connectionResults.push({
+          platform,
+          checkpointBefore,
+          checkpointAfter: checkpointBefore,
+          messagesFetched: 0,
+          messagesIngested: 0,
+          duplicates: 0,
+          pagesFetched: 0,
+          statusNote: "ENTERPRISE_WEBHOOK_REQUIRED (TikTok Business Messaging requires enterprise developer approval)",
+        });
+        continue;
+      }
+
       if (!conn.accessTokenEncrypted || !conn.platformAccountId) continue;
 
       const rawToken = TokenVault.decrypt(conn.accessTokenEncrypted);
       if (!rawToken) continue;
 
-      const platform = conn.platform as SupportedPlatform;
-      const checkpointBefore = conn.lastSyncAt?.toISOString() ?? null;
-
-      // Determine since-cursor:
-      // - If lastSyncAt exists, use it (fetchRecentPageMessages applies the 5-min overlap internally).
-      // - If no checkpoint yet (first sync), look back 24 hours to bootstrap safely.
       const sinceEpochMs = conn.lastSyncAt
         ? conn.lastSyncAt.getTime()
         : Date.now() - 24 * 60 * 60 * 1000; // 24-hour bootstrap window
 
-      // Record the reconciliation start time BEFORE the API call.
-      // The cursor is only advanced AFTER successful processing below.
       const reconStartTime = new Date();
 
       const result = await client.fetchRecentPageMessages(
@@ -106,16 +128,12 @@ export async function POST(req: NextRequest) {
       if (result.success && result.messages.length > 0) {
         for (const msg of result.messages) {
           try {
-            // THREAD ID CONSISTENCY FIX:
-            // Must use "fb_thread_{senderId}" to match the format produced by
-            // facebook.ts parseWebhookPayload (externalThreadId: `fb_thread_${customerPsid}`).
-            // Previously used "facebook_thread_{senderId}" which caused duplicate conversations.
-            const threadPrefix = platform === "FACEBOOK" ? "fb" : "ig";
+            const canonicalThreadId = getCanonicalExternalThreadId(platform, msg.senderId);
             const ingestRes = await MessageHub.ingestMessage({
               businessId,
               platform,
               externalAccountId: conn.platformAccountId,
-              externalThreadId: `${threadPrefix}_thread_${msg.senderId}`,
+              externalThreadId: canonicalThreadId,
               externalMessageId: msg.messageId,
               senderExternalId: msg.senderId,
               senderName: msg.senderName,
@@ -140,16 +158,11 @@ export async function POST(req: NextRequest) {
           }
         }
 
-        // Advance checkpoint ONLY after successful processing.
-        // Use reconStartTime (not Date.now()) so any messages received between the
-        // Meta API call and now are not accidentally skipped on the next run.
         await prisma.platformConnection.update({
           where: { id: conn.id },
           data: { lastSyncAt: reconStartTime },
         });
-
       } else if (result.success && result.messages.length === 0) {
-        // No new messages — still advance the checkpoint so we don't re-scan old data.
         await prisma.platformConnection.update({
           where: { id: conn.id },
           data: { lastSyncAt: reconStartTime },
@@ -174,11 +187,10 @@ export async function POST(req: NextRequest) {
         error: connError,
       });
 
-      // Structured telemetry log (no secrets logged)
       const durationMs = Date.now() - startedAt.getTime();
       console.log(
         `[RECONCILE][${reconciliationId}] platform=${platform} ` +
-        `pageId=${conn.platformAccountId} ` +
+        `accountId=${conn.platformAccountId} ` +
         `checkpointBefore=${checkpointBefore} checkpointAfter=${checkpointAfter} ` +
         `messagesFetched=${result.messages.length} messagesIngested=${messagesIngested} ` +
         `duplicates=${duplicates} pagesFetched=${result.pagesFetched} ` +

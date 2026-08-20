@@ -5,21 +5,23 @@ import { TokenVault } from "@/lib/connectors/token-vault";
 import { LivePlatformApiClient } from "@/lib/connectors/live-client";
 import { SupportedPlatform } from "@/lib/connectors/types";
 import { RealtimeBroadcaster } from "@/lib/realtime/broadcaster";
+import { getPlatformCapabilities } from "@/lib/connectors/registry";
 
 export const dynamic = "force-dynamic";
 
 /**
  * POST /api/messages/send
  * 
- * Secure Outbound Message Dispatcher with Real API Integration:
+ * Platform-Agnostic Outbound Message & Rich Media Dispatcher:
  * 1. Authentication & Session Verification
  * 2. Tenant Authorization (Strict Business Isolation)
- * 3. Subscription Entitlement Verification
- * 4. Platform Connection & Token Decryption
+ * 3. Platform Connection & Token Decryption
+ * 4. Dynamic Capability Validation (Text, Image, Video, Audio, Document)
  * 5. Real Platform API Dispatch (Meta Send API / WhatsApp Cloud API)
  * 6. API Response Validation & Platform Message ID Capture
- * 7. Message Persistence with Delivery Status
- * 8. Immutable Audit Trail Logging
+ * 7. Message Persistence with Delivery Status & Rich Media References
+ * 8. Realtime Event Broadcasting
+ * 9. Immutable Audit Trail Logging
  */
 export async function POST(req: NextRequest) {
   try {
@@ -27,10 +29,16 @@ export async function POST(req: NextRequest) {
     if (errorResponse) return errorResponse;
 
     const body = await req.json().catch(() => ({}));
-    const { conversationId, textContent } = body;
+    const { conversationId, textContent, mediaUrl, mediaType, filename } = body;
 
-    if (!conversationId || !textContent?.trim()) {
-      return NextResponse.json({ error: "Missing conversationId or textContent" }, { status: 400 });
+    const hasText = Boolean(textContent && textContent.trim());
+    const hasMedia = Boolean(mediaUrl && mediaType);
+
+    if (!conversationId || (!hasText && !hasMedia)) {
+      return NextResponse.json(
+        { error: "Missing conversationId, or both textContent and media are empty." },
+        { status: 400 }
+      );
     }
 
     // 1. Resolve Conversation & Customer
@@ -52,6 +60,23 @@ export async function POST(req: NextRequest) {
     const platform = conversation.platform as SupportedPlatform;
     const environment = conversation.environment || (conversation.customer.externalId?.startsWith("sim_") ? "PRACTICE" : "LIVE");
     const isPracticeConv = environment === "PRACTICE";
+
+    // 4. Dynamic Capability Validation
+    if (mediaType) {
+      const caps = getPlatformCapabilities(platform);
+      const mediaKey = mediaType.toLowerCase() as keyof typeof caps.outbound;
+      if (caps.outbound[mediaKey] === false) {
+        return NextResponse.json(
+          {
+            success: false,
+            code: "UNSUPPORTED_MEDIA_TYPE",
+            platform,
+            message: `${platform} does not support outbound ${mediaType} messages.`,
+          },
+          { status: 400 }
+        );
+      }
+    }
 
     if (!isPracticeConv && ["FACEBOOK", "INSTAGRAM", "WHATSAPP", "TIKTOK"].includes(platform)) {
       const anyConn = await prisma.platformConnection.findFirst({
@@ -79,7 +104,7 @@ export async function POST(req: NextRequest) {
             success: false,
             code: "ACCOUNT_MISMATCH",
             platform,
-            message: `Account identity mismatch on ${platform}. Reconnect your account with the correct Page credentials.`,
+            message: `Account identity mismatch on ${platform}. Reconnect your account with the correct credentials.`,
           },
           { status: 400 }
         );
@@ -121,9 +146,8 @@ export async function POST(req: NextRequest) {
     let externalMessageId = `outbound_${Date.now()}_${Math.random().toString(36).substring(7)}`;
     let platformObjectId: string | undefined;
     let dispatchStatus: "SENT" | "SIMULATED" | "FAILED" = "SIMULATED";
-    let apiErrorMessage: string | undefined;
 
-    // 4. Real Platform API Dispatch (Only for LIVE environment)
+    // 5. Real Platform API Dispatch (Only for LIVE environment)
     if (!isPracticeConv && connection && connection.accessTokenEncrypted) {
       const rawToken = TokenVault.decrypt(connection.accessTokenEncrypted);
       const recipientExternalId = conversation.customer.externalId || conversation.customer.phone || "";
@@ -135,7 +159,12 @@ export async function POST(req: NextRequest) {
           rawToken,
           connection.platformAccountId,
           recipientExternalId,
-          textContent.trim()
+          {
+            text: textContent?.trim(),
+            mediaUrl,
+            mediaType,
+            filename,
+          }
         );
 
         if (apiResult.success) {
@@ -144,17 +173,31 @@ export async function POST(req: NextRequest) {
           externalMessageId = apiResult.platformObjectId || externalMessageId;
         } else {
           dispatchStatus = "FAILED";
-          apiErrorMessage = apiResult.errorMessage;
-          return NextResponse.json({
-            error: `Failed to dispatch message to ${platform}: ${apiResult.errorMessage}`,
-            errorCategory: apiResult.statusCategory,
-            httpStatus: apiResult.httpStatus || 400,
-          }, { status: 400 });
+          return NextResponse.json(
+            {
+              error: `Failed to dispatch message to ${platform}: ${apiResult.errorMessage}`,
+              errorCategory: apiResult.statusCategory,
+              httpStatus: apiResult.httpStatus || 400,
+            },
+            { status: 400 }
+          );
         }
       }
     }
 
-    // 5. Persist Outbound Owner Message in DB
+    // Determine clean preview text
+    let messageTextContent = textContent?.trim() || "";
+    if (!messageTextContent && mediaType) {
+      const labelMap: Record<string, string> = {
+        IMAGE: "📷 Photo",
+        VIDEO: "🎥 Video",
+        AUDIO: "🎵 Voice/Audio",
+        DOCUMENT: filename ? `📎 File: ${filename}` : "📎 Document",
+      };
+      messageTextContent = labelMap[mediaType] || `[Attachment: ${mediaType}]`;
+    }
+
+    // 6. Persist Outbound Owner Message in DB
     const message = await prisma.message.create({
       data: {
         conversationId,
@@ -164,7 +207,9 @@ export async function POST(req: NextRequest) {
         platform: conversation.platform,
         externalMessageId,
         direction: "OUTBOUND",
-        textContent: textContent.trim(),
+        textContent: messageTextContent,
+        mediaUrl: mediaUrl || null,
+        mediaType: mediaType || null,
         isRead: true,
         sentAt: new Date(),
         rawPayload: JSON.stringify({
@@ -175,16 +220,20 @@ export async function POST(req: NextRequest) {
           isPractice: isPracticeConv,
           environment,
           sourceType: environment === "PRACTICE" ? "SIMULATOR" : platform,
+          messageType: mediaType || "TEXT",
+          mediaUrl,
+          mediaType,
+          filename,
         }),
       },
     });
 
-    // 6. Update Conversation preview & unread state
+    // 7. Update Conversation preview & unread state
     await prisma.conversation.update({
       where: { id: conversationId },
       data: {
         lastMessageAt: new Date(),
-        lastMessagePreview: textContent.substring(0, 120),
+        lastMessagePreview: messageTextContent.substring(0, 120),
         unreadCount: 0,
       },
     });
@@ -198,19 +247,19 @@ export async function POST(req: NextRequest) {
       platform: conversation.platform,
       environment: environment as "LIVE" | "PRACTICE" | "TEST",
       direction: "OUTBOUND",
-      preview: textContent.substring(0, 120),
+      preview: messageTextContent.substring(0, 120),
       senderName: "Store Owner",
       sentAt: new Date().toISOString(),
     });
 
-    // 7. Record Immutable Audit Log
+    // 8. Record Immutable Audit Log
     await prisma.auditLog.create({
       data: {
         businessId: conversation.businessId,
         action: "MESSAGE_SENT",
         entityType: "Message",
         entityId: message.id,
-        details: `Sent outbound message to ${conversation.customer.name} on ${conversation.platform} (${dispatchStatus}): "${textContent.substring(0, 80)}"`,
+        details: `Sent outbound message to ${conversation.customer.name} on ${conversation.platform} (${dispatchStatus}): "${messageTextContent.substring(0, 80)}"`,
         performedBy: user?.role === "ADMIN" ? "ADMIN" : "OWNER",
       },
     });

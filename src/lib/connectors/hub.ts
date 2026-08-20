@@ -1,5 +1,5 @@
 import { prisma } from "../prisma";
-import { NormalizedMessageEvent } from "./types";
+import { NormalizedMessageEvent, getCanonicalExternalThreadId } from "./types";
 import { AiClassifier } from "../ai/classifier";
 import { GroundedAiSuggestor } from "../ai/grounded-suggestor";
 import { TokenVault } from "./token-vault";
@@ -142,13 +142,14 @@ export class MessageHub {
     }
 
     // 4. Conversation Thread Resolution (Environment-Scoped & Thread-Isolated)
+    const externalThreadId = event.externalThreadId || getCanonicalExternalThreadId(event.platform, event.senderExternalId);
     let conversation = await prisma.conversation.findFirst({
       where: {
         businessId,
         customerId: customer.id,
         platform: event.platform,
         environment,
-        ...(event.externalThreadId ? { externalThreadId: event.externalThreadId } : {}),
+        ...(externalThreadId ? { externalThreadId } : {}),
       },
     });
 
@@ -160,7 +161,7 @@ export class MessageHub {
           environment,
           sourceType,
           platform: event.platform,
-          externalThreadId: event.externalThreadId,
+          externalThreadId,
           status: "ACTIVE",
           unreadCount: 0, // Will be incremented after message creation succeeds
           lastMessageAt: event.timestamp || new Date(),
@@ -259,6 +260,9 @@ export class MessageHub {
       isPractice: isSimulated,
       environment,
       sourceType,
+      messageType: event.messageType || (event.mediaUrl ? event.mediaType : "TEXT"),
+      mediaMetadata: event.mediaMetadata,
+      locationMetadata: event.locationMetadata,
     };
 
     let message;
