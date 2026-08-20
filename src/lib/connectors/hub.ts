@@ -125,13 +125,14 @@ export class MessageHub {
       }
     }
 
-    // 4. Conversation Thread Resolution (Environment-Scoped)
+    // 4. Conversation Thread Resolution (Environment-Scoped & Thread-Isolated)
     let conversation = await prisma.conversation.findFirst({
       where: {
         businessId,
         customerId: customer.id,
         platform: event.platform,
         environment,
+        ...(event.externalThreadId ? { externalThreadId: event.externalThreadId } : {}),
       },
     });
 

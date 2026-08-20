@@ -35,11 +35,16 @@ export function isFallbackCustomerName(name?: string | null): boolean {
     /^Instagram\s+User/i.test(n) ||
     /^TikTok\s+User/i.test(n) ||
     /^WhatsApp\s*\(/i.test(n) ||
-    /^Guest/i.test(n) ||
+    /^WhatsApp\s+User/i.test(n) ||
+    /^Telegram\s+User/i.test(n) ||
+    /^Guest\s*\(/i.test(n) ||
+    /^Guest$/i.test(n) ||
     /^Anonymous/i.test(n) ||
     /^Practice\s+Customer/i.test(n) ||
-    /^Customer/i.test(n) ||
-    /^User\s*\(/i.test(n)
+    /^Unknown\s+User/i.test(n) ||
+    /^Unknown\s+Customer/i.test(n) ||
+    /^User\s*\(/i.test(n) ||
+    /^Customer\s*\(/i.test(n)
   );
 }
 
