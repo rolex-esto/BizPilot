@@ -1,0 +1,21 @@
+{
+  "timestamp": "2026-08-20T08:53:40.125Z",
+  "commit": "2dcbebaffb0e243bcc9565b5ca8c28862747bee1",
+  "branch": "main",
+  "gitStatus": [
+    "M prisma/schema.prisma",
+    " M src/app/api/customers/merge/route.ts",
+    " M src/scripts/qa-runner.ts",
+    "?? src/scripts/test-phase15-adversarial.ts",
+    "?? src/scripts/test-phase16-gate.ts",
+    "?? src/scripts/test-phase17-constraints.ts",
+    "?? src/scripts/test-phase18-identity-ownership.ts",
+    "?? src/scripts/test-phase19-forensic.ts"
+  ],
+  "environment": "development",
+  "nodeVersion": "v24.18.0",
+  "nextVersion": "^14.2.15",
+  "prismaVersion": "^5.21.1",
+  "databaseTarget": "PostgreSQL (Neon Cloud Pooler, ap-southeast-1)",
+  "status": "FROZEN_FOR_PHASE20_AUDIT"
+}

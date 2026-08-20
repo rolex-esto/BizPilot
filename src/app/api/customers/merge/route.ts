@@ -66,6 +66,7 @@ export async function POST(req: NextRequest) {
       if (secondary.externalId) {
         await tx.customerIdentityLink.create({
           data: {
+            businessId: primary.businessId,
             customerId: primary.id,
             platform: secondary.primaryPlatform,
             externalId: secondary.externalId,

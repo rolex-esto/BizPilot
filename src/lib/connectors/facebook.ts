@@ -30,10 +30,14 @@ export class FacebookMessengerConnector {
           const senderId = msgEvent.sender?.id;
           const recipientId = msgEvent.recipient?.id;
 
+          const isEcho = Boolean(msgEvent.message?.is_echo);
+          const customerPsid = isEcho ? recipientId : senderId;
+          const pageIdResolved = isEcho ? (senderId || pageId) : (recipientId || pageId);
+
           // Process text or attachment message
           if (msgEvent.message) {
             const messageId = msgEvent.message.mid || `fb_msg_${Date.now()}_${Math.random().toString(36).substring(7)}`;
-            const textContent = msgEvent.message.text || "";
+            const textContent = msgEvent.message.text || msgEvent.message.quick_reply?.payload || "";
             let mediaUrl: string | undefined;
             let mediaType: any = undefined;
 
@@ -45,15 +49,32 @@ export class FacebookMessengerConnector {
 
             events.push({
               platform: "FACEBOOK",
-              externalAccountId: pageId || recipientId,
-              externalThreadId: `fb_thread_${senderId}`,
+              externalAccountId: pageIdResolved,
+              externalThreadId: `fb_thread_${customerPsid}`,
               externalMessageId: messageId,
-              senderExternalId: senderId,
-              senderName: msgEvent.senderName || `Facebook User (${senderId?.substring(0, 6) || "Guest"})`,
-              direction: "INBOUND",
+              senderExternalId: customerPsid,
+              senderName: isEcho ? "Store Owner" : (msgEvent.senderName || `Facebook User (${customerPsid?.substring(0, 6) || "Guest"})`),
+              direction: isEcho ? "OUTBOUND" : "INBOUND",
               textContent: textContent || (mediaUrl ? `[Attachment: ${mediaType}]` : "[Empty message]"),
               mediaUrl,
               mediaType,
+              rawPayload: msgEvent,
+              timestamp: time,
+            });
+          } else if (msgEvent.postback) {
+            // Handle Get Started or postback button clicks
+            const postbackText = msgEvent.postback.title || msgEvent.postback.payload || "[Button Click]";
+            const messageId = `fb_pb_${Date.now()}_${Math.random().toString(36).substring(7)}`;
+
+            events.push({
+              platform: "FACEBOOK",
+              externalAccountId: pageIdResolved,
+              externalThreadId: `fb_thread_${customerPsid}`,
+              externalMessageId: messageId,
+              senderExternalId: customerPsid,
+              senderName: msgEvent.senderName || `Facebook User (${customerPsid?.substring(0, 6) || "Guest"})`,
+              direction: "INBOUND",
+              textContent: postbackText,
               rawPayload: msgEvent,
               timestamp: time,
             });

@@ -414,7 +414,8 @@ export class LivePlatformApiClient {
         headers["Authorization"] = `Bearer ${rawToken}`;
       }
 
-      const response = await fetch(endpoint, {
+      const fetchToUse = this.config.fetchFn || globalThis.fetch;
+      const response = await fetchToUse(endpoint, {
         method: "POST",
         signal: controller.signal,
         headers,

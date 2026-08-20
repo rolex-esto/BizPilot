@@ -224,8 +224,7 @@ async function runFullQaSuite() {
   try {
     // 8.1 New customer created
     const custAExtId = `fb_cust_${Date.now()}`;
-    const evA = DeveloperSimulator.createSimulatedEvent("FACEBOOK", "Customer Alpha", "Hello", {});
-    evA.senderExternalId = custAExtId;
+    const evA = DeveloperSimulator.createSimulatedEvent("FACEBOOK", "Customer Alpha", "Hello", { businessId, senderExternalId: custAExtId });
     await MessageHub.ingestMessage(evA);
 
     const custA = await prisma.customer.findFirst({
@@ -234,8 +233,7 @@ async function runFullQaSuite() {
     const createdNew = !!custA;
 
     // 8.2 Existing customer reused on second message
-    const evA2 = DeveloperSimulator.createSimulatedEvent("FACEBOOK", "Customer Alpha", "Second message", {});
-    evA2.senderExternalId = custAExtId;
+    const evA2 = DeveloperSimulator.createSimulatedEvent("FACEBOOK", "Customer Alpha", "Second message", { businessId, senderExternalId: custAExtId });
     await MessageHub.ingestMessage(evA2);
 
     const countForCustA = await prisma.customer.count({
@@ -244,9 +242,8 @@ async function runFullQaSuite() {
     const reusedCustomer = countForCustA === 1;
 
     // 8.3 Same customer name on Instagram remains separate (No auto-merge)
-    const evIg = DeveloperSimulator.createSimulatedEvent("INSTAGRAM", "Customer Alpha", "Instagram DM", {});
     const custIgExtId = `ig_cust_${Date.now()}`;
-    evIg.senderExternalId = custIgExtId;
+    const evIg = DeveloperSimulator.createSimulatedEvent("INSTAGRAM", "Customer Alpha", "Instagram DM", { businessId, senderExternalId: custIgExtId });
     await MessageHub.ingestMessage(evIg);
 
     const custIg = await prisma.customer.findFirst({
@@ -255,27 +252,45 @@ async function runFullQaSuite() {
     const keptSeparate = custIg?.id !== custA?.id;
 
     // 8.4 Manual Customer Merge Consistency
+    let mergePass = false;
     if (custA && custIg) {
       // Merge custIg into custA via manual linker
       await prisma.$transaction(async (tx) => {
         await tx.conversation.updateMany({ where: { customerId: custIg.id }, data: { customerId: custA.id } });
         await tx.message.updateMany({ where: { customerId: custIg.id }, data: { customerId: custA.id } });
         await tx.customerIdentityLink.create({
-          data: { customerId: custA.id, platform: "INSTAGRAM", externalId: custIgExtId, externalName: "Customer Alpha" },
+          data: { businessId, customerId: custA.id, platform: "INSTAGRAM", externalId: custIgExtId, externalName: "Customer Alpha" },
         });
         await tx.customer.delete({ where: { id: custIg.id } });
       });
 
       const deletedSecondary = !(await prisma.customer.findUnique({ where: { id: custIg.id } }));
-      const linkedIdentity = await prisma.customerIdentityLink.findUnique({
-        where: { platform_externalId: { platform: "INSTAGRAM", externalId: custIgExtId } },
+      const linkedIdentity = await prisma.customerIdentityLink.findFirst({
+        where: { customerId: custA.id, platform: "INSTAGRAM", externalId: custIgExtId },
       });
 
-      const mergePass = deletedSecondary && !!linkedIdentity;
-      recordResult("STEP 8", "Customer Identity: New Customer, Reuse, Platform Separation & Manual Merge", createdNew && reusedCustomer && keptSeparate && mergePass);
+      mergePass = deletedSecondary && !!linkedIdentity;
     }
+    recordResult("STEP 8", "Customer Identity: New Customer, Reuse, Platform Separation & Manual Merge", createdNew && reusedCustomer && keptSeparate && mergePass);
   } catch (err: any) {
     recordResult("STEP 8", "Customer Identity", false, undefined, err.message);
+  } finally {
+    // Clean up all Step 8 test fixture records to prevent test data leakage into production
+    const testCusts = await prisma.customer.findMany({
+      where: {
+        OR: [
+          { name: "Customer Alpha" },
+          { externalId: { startsWith: "fb_cust_" } },
+          { externalId: { startsWith: "ig_cust_" } },
+        ],
+      },
+    });
+    for (const c of testCusts) {
+      await prisma.message.deleteMany({ where: { customerId: c.id } });
+      await prisma.conversation.deleteMany({ where: { customerId: c.id } });
+      await prisma.customerIdentityLink.deleteMany({ where: { customerId: c.id } });
+      await prisma.customer.delete({ where: { id: c.id } });
+    }
   }
 
   // ------------------------------------------------------------

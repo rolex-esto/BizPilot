@@ -32,6 +32,7 @@ model Business {
   calendarEvents      CalendarEvent[]
   customers           Customer[]
   conversations       Conversation[]
+  identityLinks       CustomerIdentityLink[]
   products            Product[]
   leads               Lead[]
   orders              Order[]
@@ -95,6 +96,7 @@ model Customer {
   calendarEvents       CalendarEvent[]
   identityLinks        CustomerIdentityLink[]
 
+  @@unique([businessId, environment, primaryPlatform, externalId])
   @@index([businessId, environment])
   @@index([businessId, primaryPlatform])
   @@index([businessId, externalId])
@@ -103,6 +105,7 @@ model Customer {
 
 model CustomerIdentityLink {
   id           String    @id @default(cuid())
+  businessId   String
   customerId   String
   platform     String    // FACEBOOK, INSTAGRAM, WHATSAPP, TIKTOK
   externalId   String
@@ -110,10 +113,12 @@ model CustomerIdentityLink {
   handle       String?
   linkedAt     DateTime  @default(now())
 
+  business     Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
   customer     Customer  @relation(fields: [customerId], references: [id], onDelete: Cascade)
 
-  @@unique([platform, externalId])
+  @@unique([businessId, platform, externalId])
   @@index([customerId])
+  @@index([businessId, platform])
 }
 
 model Conversation {

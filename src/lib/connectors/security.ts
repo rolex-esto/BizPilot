@@ -34,6 +34,18 @@ export function verifyMetaSignature(
 }
 
 /**
+ * Generates an X-Hub-Signature-256 header using HMAC SHA-256 against the APP_SECRET.
+ */
+export function generateMetaSignature(
+  rawBody: string | Buffer,
+  appSecret: string
+): string {
+  const hmac = crypto.createHmac("sha256", appSecret);
+  hmac.update(rawBody);
+  return `sha256=${hmac.digest("hex")}`;
+}
+
+/**
  * Validates Meta Webhook handshake challenge for GET requests
  */
 export function verifyMetaWebhookHandshake(
@@ -47,3 +59,5 @@ export function verifyMetaWebhookHandshake(
   }
   return { isValid: false };
 }
+
+

@@ -33,6 +33,7 @@ export class MessageHub {
         where: {
           platform: event.platform,
           platformAccountId: event.externalAccountId,
+          ...(businessId ? { businessId } : {}),
         },
       });
 
@@ -88,22 +89,36 @@ export class MessageHub {
       // Resolve best legitimate identity via official Platform Graph API or Webhook
       const resolved = await SocialIdentityResolver.resolveIdentity(event, rawPageToken);
 
-      customer = await prisma.customer.create({
-        data: {
-          businessId,
-          environment,
-          primaryPlatform: event.platform,
-          source: environment === "PRACTICE" ? "SIMULATOR" : event.platform,
-          externalId: event.senderExternalId,
-          name: resolved.name,
-          handle: resolved.handle || event.senderHandle,
-          avatarUrl: resolved.avatarUrl,
-          phone: resolved.phone || event.senderPhone,
-          email: resolved.email || event.senderEmail,
-          leadScore: 50,
-          leadStatus: "WARM",
-        },
-      });
+      try {
+        customer = await prisma.customer.create({
+          data: {
+            businessId,
+            environment,
+            primaryPlatform: event.platform,
+            source: environment === "PRACTICE" ? "SIMULATOR" : event.platform,
+            externalId: event.senderExternalId,
+            name: resolved.name,
+            handle: resolved.handle || event.senderHandle,
+            avatarUrl: resolved.avatarUrl,
+            phone: resolved.phone || event.senderPhone,
+            email: resolved.email || event.senderEmail,
+            leadScore: 50,
+            leadStatus: "WARM",
+          },
+        });
+      } catch {
+        // Concurrency collision handler: Another concurrent request created the customer first. Re-fetch.
+        customer = await prisma.customer.findFirst({
+          where: {
+            businessId,
+            environment,
+            OR: [
+              { externalId: event.senderExternalId, primaryPlatform: event.platform },
+              { identityLinks: { some: { platform: event.platform, externalId: event.senderExternalId } } },
+            ],
+          },
+        });
+      }
     } else if (isFallbackCustomerName(customer.name) && rawPageToken) {
       // Existing customer has a generic fallback ("Facebook User (377892)").
       // Re-query platform Graph API to upgrade to their legitimate display name if available.
@@ -123,6 +138,10 @@ export class MessageHub {
       } catch {
         // Preserves existing customer state if lookup fails
       }
+    }
+
+    if (!customer) {
+      throw new Error(`Failed to resolve or create customer record for ${event.platform} sender ${event.senderExternalId}`);
     }
 
     // 4. Conversation Thread Resolution (Environment-Scoped & Thread-Isolated)

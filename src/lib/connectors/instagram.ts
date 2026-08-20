@@ -25,9 +25,14 @@ export class InstagramConnector {
       if (Array.isArray(entry.messaging)) {
         for (const msgEvent of entry.messaging) {
           const senderId = msgEvent.sender?.id;
+          const recipientId = msgEvent.recipient?.id;
+          const isEcho = Boolean(msgEvent.message?.is_echo);
+          const customerIgsid = isEcho ? recipientId : senderId;
+          const igAccountId = isEcho ? (senderId || igId) : (recipientId || igId);
+
           if (msgEvent.message) {
             const messageId = msgEvent.message.mid || `ig_msg_${Date.now()}_${Math.random().toString(36).substring(7)}`;
-            const textContent = msgEvent.message.text || "";
+            const textContent = msgEvent.message.text || msgEvent.message.quick_reply?.payload || "";
             let mediaUrl: string | undefined;
             let mediaType: any = undefined;
 
@@ -39,12 +44,12 @@ export class InstagramConnector {
 
             events.push({
               platform: "INSTAGRAM",
-              externalAccountId: igId,
-              externalThreadId: `ig_thread_${senderId}`,
+              externalAccountId: igAccountId,
+              externalThreadId: `ig_thread_${customerIgsid}`,
               externalMessageId: messageId,
-              senderExternalId: senderId,
-              senderName: msgEvent.senderName || `Instagram User (${senderId?.substring(0, 6) || "Guest"})`,
-              direction: "INBOUND",
+              senderExternalId: customerIgsid,
+              senderName: isEcho ? "Store Owner" : (msgEvent.senderName || `Instagram User (${customerIgsid?.substring(0, 6) || "Guest"})`),
+              direction: isEcho ? "OUTBOUND" : "INBOUND",
               textContent: textContent || (mediaUrl ? `[Attachment: ${mediaType}]` : "[Empty message]"),
               mediaUrl,
               mediaType,
