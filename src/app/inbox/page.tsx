@@ -290,6 +290,12 @@ export default function UnifiedInboxPage() {
   const activeConvIdRef = useRef<string | null>(null);
   activeConvIdRef.current = activeConvId;
 
+  // Channel-Partitioned Cache & Generation Guards
+  const channelConvsCacheRef = useRef<Map<string, Conversation[]>>(new Map());
+  const channelGenerationRef = useRef<number>(0);
+  const activePlatformFilterRef = useRef<string>("ALL");
+  activePlatformFilterRef.current = platformFilter;
+
   const lastKnownServerTimestampRef = useRef<string | null>(null);
   const convFetchAbortRef = useRef<AbortController | null>(null);
   const activeFetchAbortRef = useRef<AbortController | null>(null);
@@ -402,6 +408,7 @@ export default function UnifiedInboxPage() {
     lastKnownServerTimestampRef.current = null;
     lastKnownActiveMsgTimestampRef.current = null;
     convMessagesCacheRef.current.clear();
+    channelConvsCacheRef.current.clear();
     cleanupPendingAttachment();
 
     setInboxMode(newMode);
@@ -481,9 +488,69 @@ export default function UnifiedInboxPage() {
     }
   };
 
-  // Fetch Conversations List (Delta / Full)
-  const fetchConversations = async (isBackgroundPoll = false) => {
-    if (isFetchingConvsRef.current) return;
+  // ─── Deterministic Channel Switch Transaction ────────────────────────────────
+  const switchPlatformFilter = (nextPlatform: string) => {
+    if (platformFilter === nextPlatform) return;
+
+    const nextGen = ++channelGenerationRef.current;
+    activePlatformFilterRef.current = nextPlatform;
+
+    // 1. Immediately abort previous in-flight requests
+    if (convFetchAbortRef.current) {
+      convFetchAbortRef.current.abort();
+      convFetchAbortRef.current = null;
+    }
+    if (activeFetchAbortRef.current) {
+      activeFetchAbortRef.current.abort();
+      activeFetchAbortRef.current = null;
+    }
+
+    // 2. Immediately close lightbox, staging, and draft reply
+    setLightboxMedia(null);
+    cleanupPendingAttachment();
+    setReplyText("");
+
+    // 3. Clear active conversation if it does not belong to the target channel
+    if (nextPlatform !== "ALL") {
+      if (activeConv && activeConv.platform !== nextPlatform) {
+        activeConvIdRef.current = null;
+        setActiveConvId(null);
+        setActiveConv(null);
+        lastKnownActiveMsgTimestampRef.current = null;
+      }
+    }
+
+    // 4. Instant Channel Cache Retrieval (0ms perceived UI latency)
+    const cachedConvs = channelConvsCacheRef.current.get(nextPlatform);
+    if (cachedConvs && cachedConvs.length > 0) {
+      setConversations(cachedConvs);
+      setLoading(false);
+    } else {
+      // Synchronously clear previous channel UI to prevent stale data lingering
+      setConversations([]);
+      setLoading(true);
+    }
+
+    // 5. Update React platformFilter state
+    setPlatformFilter(nextPlatform);
+
+    // 6. Reset delta cursor for fresh channel reconciliation
+    lastKnownServerTimestampRef.current = null;
+
+    // 7. Launch target channel fetch with generation guard
+    fetchConversations(false, nextPlatform, nextGen);
+  };
+
+  // Fetch Conversations List (Delta / Full with Channel Isolation)
+  const fetchConversations = async (
+    isBackgroundPoll = false,
+    platformOverride?: string,
+    forcedGen?: number
+  ) => {
+    const targetPlatform = platformOverride || activePlatformFilterRef.current || platformFilter;
+    const reqGen = forcedGen ?? channelGenerationRef.current;
+
+    if (isFetchingConvsRef.current && isBackgroundPoll) return;
     isFetchingConvsRef.current = true;
 
     if (!isBackgroundPoll) {
@@ -499,7 +566,7 @@ export default function UnifiedInboxPage() {
     try {
       const params = new URLSearchParams();
       params.append("environment", inboxMode);
-      if (platformFilter !== "ALL") params.append("platform", platformFilter);
+      if (targetPlatform !== "ALL") params.append("platform", targetPlatform);
       if (leadFilter !== "ALL") params.append("leadStatus", leadFilter);
 
       const since = lastKnownServerTimestampRef.current;
@@ -516,7 +583,16 @@ export default function UnifiedInboxPage() {
 
       if (abortController.signal.aborted) return;
 
+      // Strict Generation & Active Channel Guard (Prevents Stale Cross-Channel Overwrite)
+      if (reqGen !== channelGenerationRef.current || targetPlatform !== activePlatformFilterRef.current) {
+        return;
+      }
+
       const data = await res.json();
+
+      if (reqGen !== channelGenerationRef.current || targetPlatform !== activePlatformFilterRef.current) {
+        return;
+      }
 
       if (data.serverTimestamp) {
         lastKnownServerTimestampRef.current = data.serverTimestamp;
@@ -527,7 +603,9 @@ export default function UnifiedInboxPage() {
           return;
         }
 
-        const freshConvs: Conversation[] = data.conversations || [];
+        const freshConvs: Conversation[] = (data.conversations || []).filter(
+          (c: Conversation) => targetPlatform === "ALL" || c.platform === targetPlatform
+        );
         let activeConvHasUpdates = false;
 
         // Check for new inbound messages & brand new customer discovery
@@ -567,20 +645,27 @@ export default function UnifiedInboxPage() {
         knownTimestampsRef.current = updatedTimestamps;
         initialLoadDoneRef.current = true;
 
-        // Deterministic immutable state merge to prevent dropping existing records during delta returns
+        // Store into channel-partitioned cache
+        channelConvsCacheRef.current.set(targetPlatform, freshConvs);
+
+        // Deterministic immutable state merge strictly scoped to active channel
         setConversations((prevConvs) => {
           if (!isBackgroundPoll || prevConvs.length === 0) {
             return freshConvs;
           }
           const map = new Map<string, Conversation>();
-          prevConvs.forEach((c) => map.set(c.id, c));
+          prevConvs.forEach((c) => {
+            if (targetPlatform === "ALL" || c.platform === targetPlatform) {
+              map.set(c.id, c);
+            }
+          });
           freshConvs.forEach((c) => map.set(c.id, c));
           return Array.from(map.values()).sort(
             (a, b) => new Date(b.lastMessageAt).getTime() - new Date(a.lastMessageAt).getTime()
           );
         });
 
-        // Pre-populate cache
+        // Pre-populate message cache
         freshConvs.forEach((conv) => {
           if (conv.messages && conv.messages.length > 0 && !convMessagesCacheRef.current.has(conv.id)) {
             convMessagesCacheRef.current.set(conv.id, conv.messages);
@@ -1292,17 +1377,21 @@ export default function UnifiedInboxPage() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [activeConv?.messages?.length, activeConvId, aiSuggestionMinimized]);
 
-  // Filtered Conversations Search
+  // Filtered Conversations Search with Strict Channel Invariant
   const filteredConversations = useMemo(() => {
-    if (!searchQuery.trim()) return conversations;
-    const q = searchQuery.toLowerCase().trim();
-    return conversations.filter(
-      (c) =>
+    return conversations.filter((c) => {
+      if (platformFilter !== "ALL" && c.platform !== platformFilter) {
+        return false;
+      }
+      if (!searchQuery.trim()) return true;
+      const q = searchQuery.toLowerCase().trim();
+      return (
         c.customer.name.toLowerCase().includes(q) ||
         (c.customer.phone && c.customer.phone.includes(q)) ||
         (c.lastMessagePreview && c.lastMessagePreview.toLowerCase().includes(q))
-    );
-  }, [conversations, searchQuery]);
+      );
+    });
+  }, [conversations, platformFilter, searchQuery]);
 
   return (
     <div className="space-y-4 max-w-7xl mx-auto px-2 sm:px-4 py-3">
@@ -1469,7 +1558,7 @@ export default function UnifiedInboxPage() {
                   <button
                     key={tab.id}
                     type="button"
-                    onClick={() => setPlatformFilter(tab.id)}
+                    onClick={() => switchPlatformFilter(tab.id)}
                     className={`px-2.5 py-1.5 rounded-xl text-xs font-bold transition-all shrink-0 flex items-center gap-1.5 ${
                       isActive
                         ? "bg-sky-600 text-white shadow-2xs"
@@ -1570,10 +1659,10 @@ export default function UnifiedInboxPage() {
         {/* Column 2: Active Chat Thread (Full width on mobile when selected) */}
         <div
           className={`${
-            activeConvId ? "flex" : "hidden lg:flex"
+            activeConvId && (!activeConv || platformFilter === "ALL" || activeConv.platform === platformFilter) ? "flex" : "hidden lg:flex"
           } lg:col-span-5 bg-white rounded-xl border border-slate-200 shadow-xs flex-col overflow-hidden relative`}
         >
-          {activeConv ? (
+          {activeConv && (platformFilter === "ALL" || activeConv.platform === platformFilter) ? (
             <>
               {/* Active Conversation Header */}
               <div className="p-3 border-b border-slate-100 flex items-center justify-between bg-slate-50">
@@ -2102,7 +2191,7 @@ export default function UnifiedInboxPage() {
           } lg:static lg:bg-transparent lg:p-0 lg:col-span-3`}
         >
           <div className="bg-white rounded-2xl lg:rounded-xl border border-slate-200 shadow-xl lg:shadow-xs p-5 lg:p-4 w-full max-w-md lg:max-w-none flex flex-col gap-4 overflow-y-auto max-h-[85vh] lg:max-h-none">
-            {activeConv ? (
+            {activeConv && (platformFilter === "ALL" || activeConv.platform === platformFilter) ? (
               <>
                 <div className="flex items-center justify-between border-b border-slate-100 pb-2">
                   <div>
