@@ -612,6 +612,79 @@ export class LivePlatformApiClient {
       isFallback: true,
     };
   }
+
+  /**
+   * Fetches recent customer conversations directly from Meta Graph API
+   * /v19.0/{page-id}/conversations?fields=id,updated_time,messages{id,created_time,from,to,message}
+   */
+  public async fetchRecentPageMessages(
+    platform: SupportedPlatform,
+    rawPageToken: string,
+    pageId: string
+  ): Promise<{
+    success: boolean;
+    messages: Array<{
+      messageId: string;
+      senderId: string;
+      senderName: string;
+      text: string;
+      timestamp: Date;
+      direction: "INBOUND" | "OUTBOUND";
+    }>;
+    error?: string;
+  }> {
+    if (platform !== "FACEBOOK" && platform !== "INSTAGRAM") {
+      return { success: false, messages: [], error: `Pull sync not supported for ${platform}` };
+    }
+
+    try {
+      const fetchToUse = this.config.fetchFn || globalThis.fetch;
+      const url = `${this.config.metaBaseUrl}/${this.config.graphApiVersion}/${encodeURIComponent(pageId)}/conversations?fields=id,updated_time,messages{id,created_time,from,to,message}&access_token=${encodeURIComponent(rawPageToken)}`;
+
+      const response = await fetchToUse(url, {
+        method: "GET",
+        headers: { "Accept": "application/json" },
+      });
+
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        return { success: false, messages: [], error: data.error?.message || `HTTP ${response.status}` };
+      }
+
+      const results: Array<{
+        messageId: string;
+        senderId: string;
+        senderName: string;
+        text: string;
+        timestamp: Date;
+        direction: "INBOUND" | "OUTBOUND";
+      }> = [];
+      const convs = data.data || [];
+
+      for (const conv of convs) {
+        const msgList = conv.messages?.data || [];
+        for (const msg of msgList) {
+          if (!msg.message) continue;
+          const senderId = msg.from?.id;
+          const senderName = msg.from?.name || "Customer";
+          const isFromPage = senderId === pageId;
+
+          results.push({
+            messageId: msg.id,
+            senderId: isFromPage ? (msg.to?.data?.[0]?.id || "unknown") : senderId,
+            senderName: isFromPage ? "Store Owner" : senderName,
+            text: msg.message,
+            timestamp: new Date(msg.created_time || conv.updated_time),
+            direction: isFromPage ? "OUTBOUND" : "INBOUND",
+          });
+        }
+      }
+
+      return { success: true, messages: results };
+    } catch (err: any) {
+      return { success: false, messages: [], error: err.message };
+    }
+  }
 }
 
 export interface UserProfileLookupResult {

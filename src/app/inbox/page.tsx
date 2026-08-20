@@ -119,6 +119,7 @@ export default function UnifiedInboxPage() {
   const [activeConv, setActiveConv] = useState<Conversation | null>(null);
   const [showMobileProfile, setShowMobileProfile] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [syncingChannels, setSyncingChannels] = useState(false);
   const [platformFilter, setPlatformFilter] = useState("ALL");
   const [leadFilter, setLeadFilter] = useState("ALL");
   const [replyText, setReplyText] = useState("");
@@ -385,6 +386,36 @@ export default function UnifiedInboxPage() {
       console.error("Error toggling conversation handling mode:", err);
     } finally {
       setHandlingToggleLoading(false);
+    }
+  };
+
+  const handleSyncChannels = async () => {
+    setSyncingChannels(true);
+    try {
+      const res = await fetch("/api/channels/sync", { method: "POST" });
+      const data = await res.json();
+      if (data.success) {
+        if (data.syncedCount > 0) {
+          playNotificationChime();
+          setActiveToast({
+            id: "sync_toast",
+            name: "Channel Sync",
+            platform: "FACEBOOK",
+            preview: data.message,
+            convId: activeConvId || "",
+          });
+        }
+        await fetchConversations();
+        if (activeConvId) {
+          await fetchActiveConversation(activeConvId);
+        }
+      } else {
+        alert(data.message || data.error || "Channel sync failed");
+      }
+    } catch (err: any) {
+      console.error("Error syncing channels:", err);
+    } finally {
+      setSyncingChannels(false);
     }
   };
 
@@ -725,9 +756,20 @@ export default function UnifiedInboxPage() {
         <div className={`${activeConvId ? "hidden lg:flex" : "flex"} lg:col-span-4 bg-white rounded-xl border border-slate-200 shadow-sm flex-col overflow-hidden`}>
           <div className="p-3 border-b border-slate-100 bg-slate-50 flex items-center justify-between">
             <span className="text-xs font-bold text-slate-700">Inbox ({conversations.length})</span>
-            <button onClick={fetchConversations} className="text-slate-400 hover:text-slate-600">
-              <RefreshCw className="w-3.5 h-3.5" />
-            </button>
+            <div className="flex items-center gap-1.5">
+              <button
+                onClick={handleSyncChannels}
+                disabled={syncingChannels}
+                className="px-2 py-0.5 bg-sky-50 text-sky-600 hover:bg-sky-100 border border-sky-200 rounded text-[10px] font-bold inline-flex items-center gap-1 transition-colors disabled:opacity-50"
+                title="Pull and fetch latest messages directly from connected Facebook Page"
+              >
+                <RefreshCw className={`w-2.5 h-2.5 ${syncingChannels ? "animate-spin" : ""}`} />
+                {syncingChannels ? "Syncing..." : "Sync FB"}
+              </button>
+              <button onClick={fetchConversations} className="text-slate-400 hover:text-slate-600 p-0.5" title="Refresh local inbox">
+                <RefreshCw className="w-3.5 h-3.5" />
+              </button>
+            </div>
           </div>
 
           <div className="flex-1 overflow-y-auto divide-y divide-slate-100">
