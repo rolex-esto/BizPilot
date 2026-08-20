@@ -1474,8 +1474,8 @@ export default function ChannelsPage() {
                       </>
                     )}
                   </button>
-                  <p className="text-[10px] text-purple-700 font-medium">
-                    🔒 BizPilot will never ask for your password, 2FA code, or OTP.
+                  <p className="text-[11px] text-purple-700 font-medium leading-relaxed max-w-sm mx-auto">
+                    🔒 If the platform requires a password, 2FA, OTP, or identity verification, you will complete it directly on the official platform. BizPilot never receives or stores your verification codes.
                   </p>
                 </div>
 
