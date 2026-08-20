@@ -1,4 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
+import { readFile } from "fs/promises";
+import path from "path";
 import { prisma } from "@/lib/prisma";
 import { requireBusinessAuth } from "@/lib/auth/api-guard";
 import { TokenVault } from "@/lib/connectors/token-vault";
@@ -12,10 +14,21 @@ const ALLOWED_HOST_SUFFIXES = [
   "fbcdn.net",
   "fbsbx.com",
   "facebook.com",
+  "fb.com",
+  "cdninstagram.com",
+  "instagram.com",
+  "igsonar.com",
   "whatsapp.net",
+  "whatsapp.com",
   "tiktokcdn.com",
   "tiktokv.com",
   "byteoversea.com",
+  "byteoversea.net",
+  "ibyteimg.com",
+  "tiktokcdn-us.com",
+  "ttwstatic.com",
+  "vercel-storage.com",
+  "vercel.app",
 ];
 
 function isAllowedHost(urlStr: string): boolean {
@@ -141,7 +154,58 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ error: "No media URL specified" }, { status: 400 });
     }
 
-    // SSRF Check: Ensure upstream URL is an authorized social platform CDN
+    // 1. Direct Data URI Resolution (Optimized binary stream for uploaded files)
+    if (targetUrl.startsWith("data:")) {
+      const match = targetUrl.match(/^data:([^;]+);base64,(.*)$/);
+      if (!match) {
+        return NextResponse.json({ error: "Invalid data URI format" }, { status: 400 });
+      }
+      const mimeType = match[1];
+      const buffer = Buffer.from(match[2], "base64");
+      return new NextResponse(buffer, {
+        status: 200,
+        headers: {
+          "Content-Type": mimeType,
+          "Content-Length": buffer.length.toString(),
+          "Cache-Control": "private, max-age=86400",
+          "X-Content-Type-Options": "nosniff",
+          "Content-Disposition": "inline",
+        },
+      });
+    }
+
+    // 2. Direct Local Upload Resolution (Local development disk files)
+    if (targetUrl.startsWith("/uploads/")) {
+      try {
+        const filePath = path.join(process.cwd(), "public", targetUrl.replace(/^\//, ""));
+        const buffer = await readFile(filePath);
+        const ext = path.extname(filePath).toLowerCase();
+        const mimeMap: Record<string, string> = {
+          ".pdf": "application/pdf",
+          ".png": "image/png",
+          ".jpg": "image/jpeg",
+          ".jpeg": "image/jpeg",
+          ".webp": "image/webp",
+          ".mp4": "video/mp4",
+          ".mp3": "audio/mpeg",
+        };
+        const mimeType = mimeMap[ext] || "application/octet-stream";
+        return new NextResponse(buffer, {
+          status: 200,
+          headers: {
+            "Content-Type": mimeType,
+            "Content-Length": buffer.length.toString(),
+            "Cache-Control": "private, max-age=86400",
+            "X-Content-Type-Options": "nosniff",
+            "Content-Disposition": "inline",
+          },
+        });
+      } catch {
+        return NextResponse.json({ error: "Local file not found" }, { status: 404 });
+      }
+    }
+
+    // 3. Remote SSRF Check: Ensure upstream URL is an authorized social platform CDN
     if (!isAllowedHost(targetUrl)) {
       return NextResponse.json(
         { error: "Access to the requested media domain is restricted for security." },
