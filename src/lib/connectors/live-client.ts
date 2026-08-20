@@ -614,13 +614,34 @@ export class LivePlatformApiClient {
   }
 
   /**
-   * Fetches recent customer conversations directly from Meta Graph API
-   * /v19.0/{page-id}/conversations?fields=id,updated_time,messages{id,created_time,from,to,message}
+   * Fetches recent customer INBOUND messages from Meta Graph API.
+   *
+   * INCREMENTAL: When sinceEpochMs is provided, only conversations updated after that
+   * epoch are fetched. A 5-minute overlap window is applied for clock-skew safety.
+   * MessageHub's externalMessageId unique constraint makes replaying messages safe.
+   *
+   * BOUNDED: At most maxPages cursor pages are followed to prevent unbounded scans.
+   *
+   * INBOUND-ONLY: OUTBOUND echo messages (page→customer) are SKIPPED to prevent
+   * fabricating a "Store Owner" Customer record during reconciliation. Outbound
+   * messages are persisted by /api/messages/send and need no reconciliation.
+   *
+   * Meta Graph API:
+   *   GET /{page-id}/conversations
+   *     ?fields=id,updated_time,messages{id,created_time,from,to,message}
+   *     &since={unix_epoch_seconds}  ← time-bounded when sinceEpochMs is provided
+   *     &limit={perPage}
+   *     &access_token={token}
    */
   public async fetchRecentPageMessages(
     platform: SupportedPlatform,
     rawPageToken: string,
-    pageId: string
+    pageId: string,
+    options?: {
+      sinceEpochMs?: number; // ms UTC — converted to seconds for Meta API
+      maxPages?: number;     // max cursor pages to follow (default: 3)
+      perPage?: number;      // conversations per page (default: 20)
+    }
   ): Promise<{
     success: boolean;
     messages: Array<{
@@ -632,24 +653,24 @@ export class LivePlatformApiClient {
       direction: "INBOUND" | "OUTBOUND";
     }>;
     error?: string;
+    pagesFetched: number;
   }> {
     if (platform !== "FACEBOOK" && platform !== "INSTAGRAM") {
-      return { success: false, messages: [], error: `Pull sync not supported for ${platform}` };
+      return { success: false, messages: [], error: `Pull sync not supported for ${platform}`, pagesFetched: 0 };
     }
+
+    const maxPages = options?.maxPages ?? 3;
+    const perPage  = options?.perPage  ?? 20;
+
+    // 5-minute overlap window for clock-skew/Meta delivery lag safety.
+    // externalMessageId idempotency in MessageHub guarantees overlap is harmless.
+    const OVERLAP_MS = 5 * 60 * 1000;
+    const sinceEpochSec = options?.sinceEpochMs
+      ? Math.floor((options.sinceEpochMs - OVERLAP_MS) / 1000)
+      : null;
 
     try {
       const fetchToUse = this.config.fetchFn || globalThis.fetch;
-      const url = `${this.config.metaBaseUrl}/${this.config.graphApiVersion}/${encodeURIComponent(pageId)}/conversations?fields=id,updated_time,messages{id,created_time,from,to,message}&access_token=${encodeURIComponent(rawPageToken)}`;
-
-      const response = await fetchToUse(url, {
-        method: "GET",
-        headers: { "Accept": "application/json" },
-      });
-
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        return { success: false, messages: [], error: data.error?.message || `HTTP ${response.status}` };
-      }
 
       const results: Array<{
         messageId: string;
@@ -659,30 +680,86 @@ export class LivePlatformApiClient {
         timestamp: Date;
         direction: "INBOUND" | "OUTBOUND";
       }> = [];
-      const convs = data.data || [];
 
-      for (const conv of convs) {
-        const msgList = conv.messages?.data || [];
-        for (const msg of msgList) {
-          if (!msg.message) continue;
-          const senderId = msg.from?.id;
-          const senderName = msg.from?.name || "Customer";
-          const isFromPage = senderId === pageId;
-
-          results.push({
-            messageId: msg.id,
-            senderId: isFromPage ? (msg.to?.data?.[0]?.id || "unknown") : senderId,
-            senderName: isFromPage ? "Store Owner" : senderName,
-            text: msg.message,
-            timestamp: new Date(msg.created_time || conv.updated_time),
-            direction: isFromPage ? "OUTBOUND" : "INBOUND",
-          });
+      // Build initial URL
+      const buildInitialUrl = (): string => {
+        const params = new URLSearchParams({
+          fields: "id,updated_time,messages{id,created_time,from,to,message}",
+          limit: String(perPage),
+          access_token: rawPageToken,
+        });
+        if (sinceEpochSec !== null) {
+          // Meta /conversations supports `since` as a Unix epoch timestamp
+          params.set("since", String(sinceEpochSec));
         }
+        return `${this.config.metaBaseUrl}/${this.config.graphApiVersion}/${encodeURIComponent(pageId)}/conversations?${params.toString()}`;
+      };
+
+      let nextUrl: string | null = buildInitialUrl();
+      let pagesFetched = 0;
+
+      while (nextUrl && pagesFetched < maxPages) {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), this.config.timeoutMs);
+
+        let response: Response;
+        try {
+          response = await fetchToUse(nextUrl, {
+            method: "GET",
+            signal: controller.signal,
+            headers: { "Accept": "application/json" },
+          });
+        } finally {
+          clearTimeout(timeoutId);
+        }
+
+        const data = await response.json().catch(() => ({}));
+        pagesFetched++;
+
+        if (!response.ok) {
+          return {
+            success: pagesFetched > 1, // partial success if some pages collected
+            messages: results,
+            error: data.error?.message || `HTTP ${response.status}`,
+            pagesFetched,
+          };
+        }
+
+        const convs: any[] = data.data || [];
+
+        for (const conv of convs) {
+          const msgList: any[] = conv.messages?.data || [];
+          for (const msg of msgList) {
+            if (!msg.message) continue;
+
+            const senderId: string = msg.from?.id || "";
+            const senderName: string = msg.from?.name || "Customer";
+            const isFromPage = senderId === pageId;
+
+            // OUTBOUND echo safety: skip page→customer messages entirely.
+            // These are already persisted by /api/messages/send, and reconciling them
+            // would attempt to create a Customer named "Store Owner" if no conversation
+            // exists yet — which violates the no-fabricated-identity invariant.
+            if (isFromPage) continue;
+
+            results.push({
+              messageId: msg.id,
+              senderId,
+              senderName,
+              text: msg.message,
+              timestamp: new Date(msg.created_time || conv.updated_time),
+              direction: "INBOUND",
+            });
+          }
+        }
+
+        // Follow cursor within budget
+        nextUrl = (data.paging?.next as string | undefined) || null;
       }
 
-      return { success: true, messages: results };
+      return { success: true, messages: results, pagesFetched };
     } catch (err: any) {
-      return { success: false, messages: [], error: err.message };
+      return { success: false, messages: [], error: err.message, pagesFetched: 0 };
     }
   }
 }

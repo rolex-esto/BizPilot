@@ -81,14 +81,35 @@ class RealtimeBroadcasterService {
   }
 }
 
-// Global singleton instance across Next.js API routes
+// Global singleton instance across Next.js API routes WITHIN THE SAME PROCESS.
+//
+// IMPORTANT — VERCEL SERVERLESS ARCHITECTURE LIMITATION:
+// On Vercel serverless, each incoming HTTP request may execute in an isolated Lambda
+// container (process). This means:
+//
+//   - /api/realtime (SSE connection) executes in Process A
+//   - /api/webhooks/meta (webhook ingestion) executes in Process B
+//
+// The RealtimeBroadcaster instance in Process A has ZERO subscribers registered in
+// Process B, so `RealtimeBroadcaster.broadcast()` in the webhook handler will find
+// no listeners and silently do nothing.
+//
+// CONSEQUENCE: SSE delivery on Vercel is NOT authoritative. It is a best-effort
+// fast path that occasionally works when both requests land on the same warm instance.
+//
+// AUTHORITATIVE DELIVERY PATH: Neon PostgreSQL + 2s delta polling in inbox/page.tsx.
+// The DB polling will always detect new messages within its poll interval, regardless
+// of which Vercel instance handled the webhook or the SSE connection.
+//
+// Assigning to globalThis in ALL environments (not just development) ensures that
+// within a single warm Vercel instance, the singleton is stable across HMR reloads.
 const globalForRealtime = globalThis as unknown as {
   bizPilotRealtimeBroadcaster?: RealtimeBroadcasterService;
 };
 
 export const RealtimeBroadcaster =
-  globalForRealtime.bizPilotRealtimeBroadcaster || new RealtimeBroadcasterService();
+  globalForRealtime.bizPilotRealtimeBroadcaster ?? new RealtimeBroadcasterService();
 
-if (process.env.NODE_ENV !== "production") {
-  globalForRealtime.bizPilotRealtimeBroadcaster = RealtimeBroadcaster;
-}
+// Persist across hot module reloads in both dev and production (within the same process)
+globalForRealtime.bizPilotRealtimeBroadcaster = RealtimeBroadcaster;
+

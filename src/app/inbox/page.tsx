@@ -164,13 +164,35 @@ export default function UnifiedInboxPage() {
     convId: string;
   } | null>(null);
 
+  // ─── Polling Refs ────────────────────────────────────────────────────────────
+  // knownTimestampsRef: tracks the last-seen lastMessageAt per conversation for
+  // notification detection. Reset on mode-switch to prevent false positives.
   const knownTimestampsRef = useRef<Record<string, number>>({});
   const initialLoadDoneRef = useRef(false);
   const lastActiveMsgCountRef = useRef<Record<string, number>>({});
+
+  // Concurrency locks: prevent overlapping in-flight requests
   const isFetchingConvsRef = useRef(false);
   const isFetchingActiveConvRef = useRef(false);
   const isAutoReconcilingRef = useRef(false);
 
+  // Stable ref for activeConvId — allows reconciliation effect to read the current
+  // conversation ID without taking it as a dependency (which would reset the timer).
+  const activeConvIdRef = useRef<string | null>(null);
+  activeConvIdRef.current = activeConvId;
+
+  // Delta polling cursor — stores the server-provided timestamp from the last
+  // successful full/delta fetch. Background polls pass this as `since` so only
+  // conversations updated after this point are returned.
+  // Using the SERVER timestamp (not the browser clock) prevents clock-skew issues.
+  const lastKnownServerTimestampRef = useRef<string | null>(null);
+
+  // AbortController refs — each fetch creates a new controller; previous one is
+  // aborted when a mode-switch or conversation-switch invalidates the request.
+  const convFetchAbortRef = useRef<AbortController | null>(null);
+  const activeFetchAbortRef = useRef<AbortController | null>(null);
+
+  // ─── Audio Notification ──────────────────────────────────────────────────────
   // High-fidelity Web Audio API chime pop
   const playNotificationChime = () => {
     if (!soundEnabled) return;
@@ -233,9 +255,18 @@ export default function UnifiedInboxPage() {
   const formatPhp = (amt: number) =>
     `₱${amt.toLocaleString("en-PH", { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
 
+  // ─── Mode Switch ─────────────────────────────────────────────────────────────
   const switchInboxMode = (newMode: "LIVE" | "PRACTICE") => {
     if (newMode === inboxMode) return;
-    // 1. Immediately wipe all conversation & chat state so stale data vanishes instantly
+
+    // 1. Cancel any in-flight conversation fetch for the old mode
+    if (convFetchAbortRef.current) {
+      convFetchAbortRef.current.abort();
+      convFetchAbortRef.current = null;
+    }
+    isFetchingConvsRef.current = false; // reset lock so new fetch can proceed
+
+    // 2. Immediately wipe all conversation & chat state so stale data vanishes instantly
     setConversations([]);
     setActiveConvId(null);
     setActiveConv(null);
@@ -244,21 +275,87 @@ export default function UnifiedInboxPage() {
     knownTimestampsRef.current = {};
     initialLoadDoneRef.current = false;
     lastActiveMsgCountRef.current = {};
+    lastKnownServerTimestampRef.current = null; // reset delta cursor on mode switch
     setLoading(true);
 
-    // 2. Switch mode and fetch fresh data
+    // 3. Switch mode and fetch fresh full data (no delta cursor)
     setInboxMode(newMode);
-    fetchConversations(newMode);
+    fetchConversations({ targetMode: newMode, forceFull: true });
   };
 
-  const fetchConversations = async (targetMode?: "LIVE" | "PRACTICE") => {
+  // ─── fetchConversations ──────────────────────────────────────────────────────
+  /**
+   * Fetches the conversation list from Neon DB.
+   *
+   * FULL fetch (forceFull=true or no cursor):
+   *   Used on initial load and mode-switch. Returns all conversations.
+   *
+   * DELTA fetch (default for background polls):
+   *   Passes since=<lastKnownServerTimestamp>&deltaOnly=true.
+   *   Server returns { hasUpdates: false, conversations: [] } when nothing changed,
+   *   saving bandwidth. When hasUpdates=true, full list is re-fetched to keep state
+   *   consistent (avoids partial-merge complexity).
+   *
+   * NOTIFICATION RULE: Only fires chime/toast when:
+   *   - NOT the initial load
+   *   - lastMessageAt on a conversation increased since last poll
+   *   - The conversation has unreadCount > 0 (meaning the new message is INBOUND)
+   */
+  const fetchConversations = async (opts?: {
+    targetMode?: "LIVE" | "PRACTICE";
+    forceFull?: boolean;
+    signal?: AbortSignal;
+  }) => {
     if (isFetchingConvsRef.current) return;
     isFetchingConvsRef.current = true;
-    const currentMode = targetMode || inboxMode;
+
+    const currentMode = opts?.targetMode || inboxMode;
+    const forceFull = opts?.forceFull ?? false;
+
+    // Create a new AbortController for this request
+    const abortController = new AbortController();
+    convFetchAbortRef.current = abortController;
+    const signal = abortController.signal;
+
     try {
-      const res = await fetch(`/api/conversations?environment=${currentMode}&platform=${platformFilter}&leadStatus=${leadFilter}`);
+      // Step 1: Check if there are any updates (delta check)
+      const cursor = lastKnownServerTimestampRef.current;
+      const useDelta = !forceFull && cursor !== null && initialLoadDoneRef.current;
+
+      if (useDelta) {
+        // Fast delta check: only fetch full list if something actually changed
+        const deltaUrl = `/api/conversations?environment=${currentMode}&platform=${platformFilter}&leadStatus=${leadFilter}&since=${encodeURIComponent(cursor!)}&deltaOnly=true`;
+        const deltaRes = await fetch(deltaUrl, { signal });
+
+        if (signal.aborted) return;
+
+        const deltaData = await deltaRes.json();
+        // Update cursor regardless (server always returns a fresh serverTimestamp)
+        if (deltaData.serverTimestamp) {
+          lastKnownServerTimestampRef.current = deltaData.serverTimestamp;
+        }
+
+        // No updates in DB → skip the full fetch entirely
+        if (deltaData.hasUpdates === false) {
+          return;
+        }
+        // hasUpdates=true → fall through to full fetch below
+      }
+
+      // Step 2: Full conversation fetch (no since param)
+      const fullUrl = `/api/conversations?environment=${currentMode}&platform=${platformFilter}&leadStatus=${leadFilter}`;
+      const res = await fetch(fullUrl, { signal });
+
+      if (signal.aborted) return;
+
       const data = await res.json();
+
       if (data.status === "success") {
+        // Update cursor with authoritative server timestamp
+        if (data.serverTimestamp) {
+          lastKnownServerTimestampRef.current = data.serverTimestamp;
+        }
+
         const convList = (data.conversations as Conversation[]) || [];
         setConversations(convList);
         setActiveConvId((prev) => {
@@ -268,7 +365,9 @@ export default function UnifiedInboxPage() {
           return prev;
         });
 
-        // Check for new inbound customer message
+        // ── Notification detection ──────────────────────────────────────────
+        // Only fire for INBOUND messages (conversations where unreadCount > 0
+        // AND lastMessageAt has increased since our last baseline).
         let hasNewInbound = false;
         let incomingToast: {
           id: string;
@@ -282,7 +381,12 @@ export default function UnifiedInboxPage() {
           const lastTime = new Date(conv.lastMessageAt).getTime();
           const prevTime = knownTimestampsRef.current[conv.id];
 
-          if (initialLoadDoneRef.current && prevTime !== undefined && lastTime > prevTime) {
+          if (
+            initialLoadDoneRef.current &&
+            prevTime !== undefined &&
+            lastTime > prevTime &&
+            conv.unreadCount > 0  // only INBOUND messages increment unreadCount
+          ) {
             hasNewInbound = true;
             incomingToast = {
               id: conv.id,
@@ -307,9 +411,14 @@ export default function UnifiedInboxPage() {
           }
         }
       }
-    } catch (err) {
+    } catch (err: any) {
+      if (err?.name === "AbortError") return; // request was intentionally cancelled
       console.error("Error fetching conversations:", err);
     } finally {
+      // Only release lock if this is still the active controller
+      if (convFetchAbortRef.current === abortController) {
+        convFetchAbortRef.current = null;
+      }
       isFetchingConvsRef.current = false;
       setLoading(false);
     }
@@ -331,14 +440,33 @@ export default function UnifiedInboxPage() {
     }
   };
 
+  // ─── fetchActiveConversation ─────────────────────────────────────────────────
+  /**
+   * Fetches the full message thread for the active conversation.
+   *
+   * AbortController is used to cancel stale requests when the user switches
+   * conversations rapidly. The response is only applied if the conversation ID
+   * matches the one that was active when the request was started.
+   */
   const fetchActiveConversation = async (id: string) => {
     if (isFetchingActiveConvRef.current) return;
     isFetchingActiveConvRef.current = true;
+
+    const abortController = new AbortController();
+    activeFetchAbortRef.current = abortController;
+
     try {
-      const res = await fetch(`/api/conversations/${id}`);
+      const res = await fetch(`/api/conversations/${id}`, { signal: abortController.signal });
+
+      if (abortController.signal.aborted) return;
+
       const data = await res.json();
       if (data.status === "success") {
         const conv = data.conversation as Conversation;
+
+        // Guard: discard response if conversation changed while request was in flight
+        if (activeConvIdRef.current !== id) return;
+
         setActiveConv(conv);
         setOrderAddress(conv.customer.deliveryAddress || "");
         setOrderPhone(conv.customer.phone || "");
@@ -348,15 +476,20 @@ export default function UnifiedInboxPage() {
         const prevCount = lastActiveMsgCountRef.current[id];
         if (prevCount !== undefined && msgCount > prevCount) {
           const lastMsg = messages[messages.length - 1];
+          // Only chime for new INBOUND messages in the active thread
           if (lastMsg && lastMsg.direction === "INBOUND") {
             playNotificationChime();
           }
         }
         lastActiveMsgCountRef.current[id] = msgCount;
       }
-    } catch (err) {
+    } catch (err: any) {
+      if (err?.name === "AbortError") return;
       console.error("Error fetching conversation details:", err);
     } finally {
+      if (activeFetchAbortRef.current === abortController) {
+        activeFetchAbortRef.current = null;
+      }
       isFetchingActiveConvRef.current = false;
     }
   };
@@ -424,7 +557,11 @@ export default function UnifiedInboxPage() {
   const handleSyncChannels = async () => {
     setSyncingChannels(true);
     try {
-      const res = await fetch("/api/channels/sync", { method: "POST" });
+      const res = await fetch("/api/channels/sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}), // explicit sync — no background flag
+      });
       const data = await res.json();
       if (data.success) {
         if (data.syncedCount > 0) {
@@ -437,7 +574,9 @@ export default function UnifiedInboxPage() {
             convId: activeConvId || "",
           });
         }
-        await fetchConversations();
+        // Force full re-fetch after manual sync (reset cursor)
+        lastKnownServerTimestampRef.current = null;
+        await fetchConversations({ forceFull: true });
         if (activeConvId) {
           await fetchActiveConversation(activeConvId);
         }
@@ -451,41 +590,166 @@ export default function UnifiedInboxPage() {
     }
   };
 
+  // ─── Effect 1: Conversation polling ─────────────────────────────────────────
+  // Runs when inboxMode, platformFilter, or leadFilter changes.
+  // Initial load: full fetch. Background interval: delta fetch.
+  // Visibility handling: pause when hidden, immediately re-fetch when visible.
   useEffect(() => {
-    fetchConversations();
+    // Full fetch on mount/mode-switch
+    fetchConversations({ forceFull: true });
     fetchProducts();
 
-    // Fast non-overlapping auto-sync interval (2.0s)
-    const convInterval = setInterval(() => {
-      fetchConversations();
+    let convInterval: ReturnType<typeof setInterval> | null = null;
+
+    const startPolling = () => {
+      if (convInterval) return; // already running
+      convInterval = setInterval(() => {
+        // Skip poll when tab is hidden — avoids wasting Vercel function invocations
+        if (typeof document !== "undefined" && document.hidden) return;
+        fetchConversations(); // delta poll (uses lastKnownServerTimestampRef)
+      }, 2000);
+    };
+
+    const stopPolling = () => {
+      if (convInterval) {
+        clearInterval(convInterval);
+        convInterval = null;
+      }
+    };
+
+    // Start polling immediately
+    startPolling();
+
+    // Visibility change handler:
+    // - Hidden: stop interval (pause)
+    // - Visible: immediately fetch + restart interval
+    const handleVisibilityChange = () => {
+      if (typeof document === "undefined") return;
+      if (document.hidden) {
+        stopPolling();
+      } else {
+        // Immediate refresh on restore; then restart interval
+        fetchConversations({ forceFull: false });
+        startPolling();
+      }
+    };
+
+    if (typeof document !== "undefined") {
+      document.addEventListener("visibilitychange", handleVisibilityChange);
+    }
+
+    return () => {
+      stopPolling();
+      if (typeof document !== "undefined") {
+        document.removeEventListener("visibilitychange", handleVisibilityChange);
+      }
+    };
+  }, [inboxMode, platformFilter, leadFilter]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ─── Effect 2: Active conversation thread polling ────────────────────────────
+  useEffect(() => {
+    if (!activeConvId) return;
+
+    // Cancel any stale request for the previous conversation
+    if (activeFetchAbortRef.current) {
+      activeFetchAbortRef.current.abort();
+      activeFetchAbortRef.current = null;
+    }
+    isFetchingActiveConvRef.current = false;
+
+    fetchActiveConversation(activeConvId);
+
+    // Reset document title once conversation is active
+    if (typeof document !== "undefined") {
+      document.title = "BizPilot - Customer Messages";
+    }
+
+    const capturedConvId = activeConvId; // capture for closure safety
+
+    const chatInterval = setInterval(() => {
+      // Ignore if tab is hidden or the conversation changed
+      if (typeof document !== "undefined" && document.hidden) return;
+      if (activeConvIdRef.current !== capturedConvId) return;
+      fetchActiveConversation(capturedConvId);
     }, 2000);
 
-    return () => clearInterval(convInterval);
-  }, [inboxMode, platformFilter, leadFilter]);
+    return () => clearInterval(chatInterval);
+  }, [activeConvId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  useEffect(() => {
-    if (activeConvId) {
-      fetchActiveConversation(activeConvId);
-
-      // Reset document title once conversation is active
-      if (typeof document !== "undefined") {
-        document.title = "BizPilot - Customer Messages";
-      }
-
-      // Fast non-overlapping active chat thread stream (2.0s)
-      const chatInterval = setInterval(() => {
-        fetchActiveConversation(activeConvId);
-      }, 2000);
-
-      return () => clearInterval(chatInterval);
-    }
-  }, [activeConvId]);
-
-  // Background Self-Healing Graph API Auto-Reconciliation (LIVE Mode Only)
+  // ─── Effect 3: Background Meta reconciliation (LIVE mode only) ───────────────
+  //
+  // BUG FIX: `activeConvId` was previously in the dependency array, which caused
+  // the 18s reconciliation timer to reset every time the user clicked a conversation.
+  // Now `activeConvId` is accessed via `activeConvIdRef` (a stable ref) inside the
+  // effect — so the timer only resets when inboxMode changes.
+  //
+  // MULTI-TAB COORDINATION: Uses BroadcastChannel to elect a single "leader" tab.
+  // Only the leader fires POST /api/channels/sync. Other tabs rely on DB polling.
+  // Leadership expires after 30 seconds; any tab can take over on leader failure.
   useEffect(() => {
     if (inboxMode !== "LIVE") return;
 
+    // BroadcastChannel leader election — gracefully falls back if unavailable
+    let bc: BroadcastChannel | null = null;
+    let isLeader = false;
+    let leaderHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
+    let leaderCheckTimer: ReturnType<typeof setInterval> | null = null;
+    let lastLeaderHeartbeat = 0;
+    const LEADER_TIMEOUT_MS = 30_000; // assume leader dead after 30s of silence
+    const HEARTBEAT_INTERVAL_MS = 10_000;
+
+    const tryBecomeLeader = () => {
+      if (isLeader) return;
+      const now = Date.now();
+      if (now - lastLeaderHeartbeat > LEADER_TIMEOUT_MS) {
+        isLeader = true;
+        bc?.postMessage({ type: "LEADER_ELECTED" });
+      }
+    };
+
+    if (typeof BroadcastChannel !== "undefined") {
+      try {
+        bc = new BroadcastChannel("bizpilot_reconcile_leader");
+        bc.onmessage = (e) => {
+          if (e.data?.type === "LEADER_HEARTBEAT") {
+            lastLeaderHeartbeat = Date.now();
+            isLeader = false; // yield leadership to the active heartbeat sender
+          } else if (e.data?.type === "LEADER_ELECTED") {
+            lastLeaderHeartbeat = Date.now();
+            isLeader = false;
+          }
+        };
+
+        // Wait one full timeout before competing for leadership
+        // (so the existing leader can announce itself first)
+        const electTimer = setTimeout(tryBecomeLeader, LEADER_TIMEOUT_MS);
+
+        leaderCheckTimer = setInterval(tryBecomeLeader, LEADER_TIMEOUT_MS);
+
+        leaderHeartbeatTimer = setInterval(() => {
+          if (isLeader) {
+            bc?.postMessage({ type: "LEADER_HEARTBEAT" });
+          }
+        }, HEARTBEAT_INTERVAL_MS);
+
+        // Cleanup elect timer on effect teardown
+        return () => {
+          clearTimeout(electTimer);
+          clearInterval(leaderHeartbeatTimer!);
+          clearInterval(leaderCheckTimer!);
+          bc?.close();
+        };
+      } catch {
+        // BroadcastChannel failed — become leader unconditionally (safe, DB is idempotent)
+        isLeader = true;
+      }
+    } else {
+      // No BroadcastChannel support — become leader unconditionally
+      isLeader = true;
+    }
+
     const runAutoReconciliation = async () => {
+      if (!isLeader) return; // non-leader tabs skip Meta API calls
       if (isAutoReconcilingRef.current) return;
       isAutoReconcilingRef.current = true;
       try {
@@ -496,30 +760,40 @@ export default function UnifiedInboxPage() {
         });
         const data = await res.json();
         if (data.success && data.syncedCount > 0) {
-          console.log(`[AUTO-RECONCILE] Ingested ${data.syncedCount} new message(s) in background.`);
-          fetchConversations("LIVE");
-          if (activeConvId) {
-            fetchActiveConversation(activeConvId);
+          console.log(`[AUTO-RECONCILE] Ingested ${data.syncedCount} new message(s).`);
+          // New messages in DB → trigger immediate full fetch (bypass delta cursor)
+          lastKnownServerTimestampRef.current = null;
+          fetchConversations({ targetMode: "LIVE", forceFull: true });
+          const currentActiveId = activeConvIdRef.current;
+          if (currentActiveId) {
+            fetchActiveConversation(currentActiveId);
           }
         }
-      } catch (err) {
-        // Graceful silent fallback
+      } catch {
+        // Graceful silent fallback — next interval will retry
       } finally {
         isAutoReconcilingRef.current = false;
       }
     };
 
-    // Run after 2.5s initially, then every 18s
-    const initialTimer = setTimeout(runAutoReconciliation, 2500);
-    const reconInterval = setInterval(runAutoReconciliation, 18000);
+    // Run after 3s initially (give webhook path a chance), then every 20s
+    const initialTimer = setTimeout(runAutoReconciliation, 3000);
+    const reconInterval = setInterval(runAutoReconciliation, 20000);
 
     return () => {
       clearTimeout(initialTimer);
       clearInterval(reconInterval);
+      if (leaderHeartbeatTimer) clearInterval(leaderHeartbeatTimer);
+      if (leaderCheckTimer) clearInterval(leaderCheckTimer);
+      bc?.close();
     };
-  }, [inboxMode, activeConvId]);
+  }, [inboxMode]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Event-Driven Real-time Stream (SSE) with Graceful Polling Fallback
+  // ─── Effect 4: SSE (optional fast-path) ─────────────────────────────────────
+  // SSE is NOT the authoritative delivery path on Vercel serverless. The in-memory
+  // broadcaster cannot bridge across Lambda invocations. SSE is kept as a best-effort
+  // latency optimization: when it works (same-process), it triggers an immediate
+  // fetch. When it fails (different instance), DB polling recovers the message.
   useEffect(() => {
     let eventSource: EventSource | null = null;
 
@@ -536,15 +810,17 @@ export default function UnifiedInboxPage() {
                 return;
               }
 
-              // Instantly refresh conversations list
-              fetchConversations(inboxMode);
+              // SSE event → force an immediate full fetch (bypass delta cursor)
+              lastKnownServerTimestampRef.current = null;
+              fetchConversations({ targetMode: inboxMode, forceFull: true });
 
-              // If event belongs to currently active conversation, refresh message stream immediately
-              if (activeConvId && event.conversationId === activeConvId) {
-                fetchActiveConversation(activeConvId);
+              // If event belongs to currently active conversation, refresh thread
+              const currentActiveId = activeConvIdRef.current;
+              if (currentActiveId && event.conversationId === currentActiveId) {
+                fetchActiveConversation(currentActiveId);
               }
 
-              // Play notification chime & trigger toast for incoming messages
+              // Notification: only for INBOUND events (SSE provides direction field)
               if (event.direction === "INBOUND") {
                 playNotificationChime();
                 setActiveToast({
@@ -560,16 +836,16 @@ export default function UnifiedInboxPage() {
               }
             }
           } catch {
-            // Heartbeat/ping ignore
+            // Heartbeat/ping — ignore parse errors
           }
         };
 
         eventSource.onerror = () => {
-          // Fallback interval polling continues seamlessly
+          // DB polling continues seamlessly — SSE failure is non-fatal
           eventSource?.close();
         };
       } catch {
-        // Fallback polling active
+        // SSE unavailable — polling is the fallback
       }
     }
 
@@ -578,7 +854,7 @@ export default function UnifiedInboxPage() {
         eventSource.close();
       }
     };
-  }, [inboxMode, activeConvId]);
+  }, [inboxMode]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Smooth auto-scroll to bottom whenever new messages arrive
   useEffect(() => {
