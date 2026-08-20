@@ -777,7 +777,9 @@ export default function UnifiedInboxPage() {
   };
 
   const triggerFilePicker = (acceptType: string) => {
+    setShowAttachMenu(false);
     if (!fileInputRef.current) return;
+    fileInputRef.current.value = "";
     fileInputRef.current.accept = acceptType;
     fileInputRef.current.click();
   };
