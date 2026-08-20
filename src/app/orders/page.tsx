@@ -395,7 +395,16 @@ export default function OrdersPage() {
                         </div>
                         <div className="text-slate-600 flex items-center gap-1">
                           <Calendar className="w-3.5 h-3.5 text-purple-600" />
-                          {order.meetupSchedule ? new Date(order.meetupSchedule).toLocaleDateString() : "Schedule TBD"}
+                          {order.meetupSchedule
+                            ? new Date(order.meetupSchedule).toLocaleString("en-US", {
+                                month: "short",
+                                day: "numeric",
+                                year: "numeric",
+                                hour: "numeric",
+                                minute: "2-digit",
+                                hour12: true,
+                              })
+                            : "Schedule TBD"}
                           {order.meetupStatus && ` (${order.meetupStatus})`}
                         </div>
                       </div>
