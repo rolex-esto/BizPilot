@@ -1,7 +1,7 @@
 "use client";
 
 import React from "react";
-import { Store, Sparkles, CheckCircle2, ShieldCheck, Calendar, Package, ShoppingBag, MessageSquare, Clock, ArrowRight } from "lucide-react";
+import { Store, Sparkles, CheckCircle2, ShieldCheck, Calendar, Package, ShoppingBag, MessageSquare, Clock, ArrowRight, Info } from "lucide-react";
 
 export default function PrintableGuidePdfPage() {
   const handlePrint = () => {
@@ -10,22 +10,52 @@ export default function PrintableGuidePdfPage() {
 
   return (
     <div className="bg-slate-50 min-h-screen py-10 px-4 sm:px-6 lg:px-8 text-slate-900 font-sans print:bg-white print:p-0 print:m-0">
+      <style jsx global>{`
+        @page {
+          size: portrait;
+          margin: 12mm 15mm;
+        }
+        @media print {
+          html, body {
+            background: #ffffff !important;
+            color: #0f172a !important;
+          }
+          section, .print-card {
+            break-inside: avoid;
+            page-break-inside: avoid;
+          }
+          a[href]:after {
+            content: none !important;
+          }
+        }
+      `}</style>
+
       {/* Action Bar for Browser Printing */}
-      <div className="max-w-4xl mx-auto mb-6 flex items-center justify-between print:hidden bg-white p-4 rounded-2xl shadow-sm border border-slate-200">
-        <div className="flex items-center gap-2 text-xs text-slate-600 font-semibold">
-          <Sparkles className="w-4 h-4 text-purple-600" />
-          <span>BizPilot Owner Migration & Operations Guide (PDF Ready)</span>
+      <div className="max-w-4xl mx-auto mb-6 print:hidden space-y-2">
+        <div className="bg-white p-4 rounded-2xl shadow-sm border border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-center gap-2 text-xs text-slate-700 font-bold">
+            <Sparkles className="w-4 h-4 text-purple-600" />
+            <span>BizPilot Store Operations Manual (Print / PDF Ready)</span>
+          </div>
+          <button
+            onClick={handlePrint}
+            className="px-6 py-2.5 bg-purple-600 hover:bg-purple-700 text-white rounded-xl text-xs font-bold shadow-md shadow-purple-600/20 transition-all flex items-center justify-center gap-2"
+          >
+            📄 Save / Export Clean PDF (Cmd + P)
+          </button>
         </div>
-        <button
-          onClick={handlePrint}
-          className="px-5 py-2.5 bg-purple-600 hover:bg-purple-700 text-white rounded-xl text-xs font-bold shadow-md shadow-purple-600/20 transition-all flex items-center gap-2"
-        >
-          📄 Save / Export as PDF (Cmd + P)
-        </button>
+
+        {/* Browser Settings Guide */}
+        <div className="bg-purple-50 border border-purple-200 rounded-xl p-3 flex items-start gap-2.5 text-xs text-purple-950">
+          <Info className="w-4 h-4 text-purple-600 shrink-0 mt-0.5" />
+          <div>
+            <strong>To remove the URL link and date from your PDF:</strong> In the Chrome print preview window on the right, click <strong>"More settings"</strong>, uncheck <strong>"Headers and footers"</strong>, and set <strong>Layout</strong> to <strong>"Portrait"</strong>.
+          </div>
+        </div>
       </div>
 
       {/* Printable Document Container (A4 / Standard Letter Page Layout) */}
-      <main className="max-w-4xl mx-auto bg-white p-8 sm:p-12 rounded-3xl shadow-xl border border-slate-200/80 space-y-8 print:shadow-none print:border-none print:p-6 print:rounded-none">
+      <main className="max-w-4xl mx-auto bg-white p-8 sm:p-12 rounded-3xl shadow-xl border border-slate-200/80 space-y-8 print:shadow-none print:border-none print:p-0 print:rounded-none">
         
         {/* Document Header */}
         <div className="border-b-2 border-slate-900 pb-6 flex items-start justify-between">
