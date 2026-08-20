@@ -40,11 +40,47 @@ export class FacebookMessengerConnector {
             const textContent = msgEvent.message.text || msgEvent.message.quick_reply?.payload || "";
             let mediaUrl: string | undefined;
             let mediaType: any = undefined;
+            let resolvedText = textContent;
 
             if (Array.isArray(msgEvent.message.attachments) && msgEvent.message.attachments.length > 0) {
               const att = msgEvent.message.attachments[0];
               mediaUrl = att.payload?.url;
               mediaType = att.type?.toUpperCase();
+
+              if (!resolvedText) {
+                // Sticker detection:
+                // Meta sends stickers as image attachments with a sticker_id.
+                // The sticker_id can appear at message.sticker_id or att.payload.sticker_id.
+                const stickerId: number | undefined =
+                  msgEvent.message.sticker_id ?? att.payload?.sticker_id;
+
+                if (stickerId !== undefined) {
+                  // Well-known Facebook Like sticker IDs (small / medium / large)
+                  const LIKE_STICKER_IDS = new Set([
+                    369239263222822,  // 👍 small
+                    369239343222814,  // 👍 medium
+                    369239383222810,  // 👍 large
+                    369239423222806,  // 👍 extra large
+                  ]);
+                  resolvedText = LIKE_STICKER_IDS.has(stickerId)
+                    ? "👍"                   // Facebook "Like" button
+                    : "🎭 Sent a sticker";   // other sticker
+                } else {
+                  // Regular media attachment — show a readable label with emoji
+                  const mediaLabels: Record<string, string> = {
+                    IMAGE:    "📷 Sent a photo",
+                    VIDEO:    "🎥 Sent a video",
+                    AUDIO:    "🎵 Sent a voice message",
+                    FILE:     "📎 Sent a file",
+                    FALLBACK: "🔗 Sent a link",
+                  };
+                  resolvedText = mediaLabels[mediaType ?? ""] ?? `📎 Sent an attachment`;
+                }
+              }
+            }
+
+            if (!resolvedText) {
+              resolvedText = "[Empty message]";
             }
 
             events.push({
@@ -55,7 +91,7 @@ export class FacebookMessengerConnector {
               senderExternalId: customerPsid,
               senderName: isEcho ? "Store Owner" : (msgEvent.senderName || `Facebook User (${customerPsid?.substring(0, 6) || "Guest"})`),
               direction: isEcho ? "OUTBOUND" : "INBOUND",
-              textContent: textContent || (mediaUrl ? `[Attachment: ${mediaType}]` : "[Empty message]"),
+              textContent: resolvedText,
               mediaUrl,
               mediaType,
               rawPayload: msgEvent,
