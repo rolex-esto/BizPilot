@@ -60,67 +60,75 @@ export class InstagramConnector {
           if (msgEvent.message) {
             const messageId = msgEvent.message.mid || `ig_msg_${Date.now()}_${Math.random().toString(36).substring(7)}`;
             const textContent = msgEvent.message.text || msgEvent.message.quick_reply?.payload || "";
-            let mediaUrl: string | undefined;
-            let mediaType: MediaType | undefined;
-            let messageType: MessageType = "TEXT";
-            let mediaMetadata: MediaMetadata | undefined;
-            let resolvedText = textContent;
+            const attachmentsList = Array.isArray(msgEvent.message.attachments) ? msgEvent.message.attachments : [];
 
-            if (Array.isArray(msgEvent.message.attachments) && msgEvent.message.attachments.length > 0) {
-              const att = msgEvent.message.attachments[0];
-              const rawType = (att.type || "").toLowerCase();
-              const payloadData = att.payload || {};
+            if (attachmentsList.length === 0) {
+              events.push({
+                platform: "INSTAGRAM",
+                externalAccountId: igAccountId,
+                externalThreadId: getCanonicalExternalThreadId("INSTAGRAM", customerIgsid),
+                externalMessageId: messageId,
+                senderExternalId: customerIgsid,
+                senderName: isEcho ? "Store Owner" : (msgEvent.senderName || `Instagram User (${customerIgsid?.substring(0, 6) || "Guest"})`),
+                direction: isEcho ? "OUTBOUND" : "INBOUND",
+                messageType: "TEXT",
+                textContent: textContent || "[Empty message]",
+                rawPayload: msgEvent,
+                timestamp: time,
+              });
+            } else {
+              attachmentsList.forEach((att: any, idx: number) => {
+                const subMessageId = idx === 0 ? messageId : `${messageId}_att_${idx}`;
+                const rawType = (att.type || "").toLowerCase();
+                const payloadData = att.payload || {};
+                let mediaUrl: string | undefined = payloadData.url;
+                let mediaType: MediaType | undefined;
+                let messageType: MessageType = "TEXT";
+                let mediaMetadata: MediaMetadata | undefined;
+                let resolvedText = idx === 0 ? textContent : "";
 
-              if (rawType === "image" || rawType === "story_mention") {
-                mediaUrl = payloadData.url;
-                mediaType = "IMAGE";
-                messageType = "IMAGE";
-                if (!resolvedText) resolvedText = rawType === "story_mention" ? "📸 Mentioned you in a story" : "📷 Sent a photo";
-                mediaMetadata = { url: mediaUrl, mimeType: "image/jpeg" };
-              } else if (rawType === "video" || rawType === "reel" || rawType === "ig_reel") {
-                mediaUrl = payloadData.url;
-                mediaType = "VIDEO";
-                messageType = "VIDEO";
-                if (!resolvedText) resolvedText = rawType.includes("reel") ? "🎥 Shared a Reel" : "🎥 Sent a video";
-                mediaMetadata = { url: mediaUrl, mimeType: "video/mp4" };
-              } else if (rawType === "audio" || rawType === "voice") {
-                mediaUrl = payloadData.url;
-                mediaType = "AUDIO";
-                messageType = "AUDIO";
-                if (!resolvedText) resolvedText = "🎵 Sent a voice message";
-                mediaMetadata = { url: mediaUrl, mimeType: "audio/aac" };
-              } else if (rawType === "share") {
-                mediaUrl = payloadData.url;
-                messageType = "UNKNOWN";
-                if (!resolvedText) resolvedText = `🔗 Shared post / link: ${payloadData.url || ""}`;
-                mediaMetadata = { url: mediaUrl };
-              } else {
-                mediaUrl = payloadData.url;
-                if (!resolvedText) resolvedText = `📎 Sent an attachment (${rawType || "file"})`;
-                mediaMetadata = { url: mediaUrl };
-              }
+                if (rawType === "image" || rawType === "story_mention") {
+                  mediaType = "IMAGE";
+                  messageType = "IMAGE";
+                  if (!resolvedText) resolvedText = rawType === "story_mention" ? "📸 Mentioned you in a story" : "📷 Sent a photo";
+                  mediaMetadata = { url: mediaUrl, mimeType: "image/jpeg" };
+                } else if (rawType === "video" || rawType === "reel" || rawType === "ig_reel") {
+                  mediaType = "VIDEO";
+                  messageType = "VIDEO";
+                  if (!resolvedText) resolvedText = rawType.includes("reel") ? "🎥 Shared a Reel" : "🎥 Sent a video";
+                  mediaMetadata = { url: mediaUrl, mimeType: "video/mp4" };
+                } else if (rawType === "audio" || rawType === "voice") {
+                  mediaType = "AUDIO";
+                  messageType = "AUDIO";
+                  if (!resolvedText) resolvedText = "🎵 Sent a voice message";
+                  mediaMetadata = { url: mediaUrl, mimeType: "audio/aac" };
+                } else if (rawType === "share") {
+                  messageType = "UNKNOWN";
+                  if (!resolvedText) resolvedText = `🔗 Shared post / link: ${payloadData.url || ""}`;
+                  mediaMetadata = { url: mediaUrl };
+                } else {
+                  if (!resolvedText) resolvedText = `📎 Sent an attachment (${rawType || "file"})`;
+                  mediaMetadata = { url: mediaUrl };
+                }
+
+                events.push({
+                  platform: "INSTAGRAM",
+                  externalAccountId: igAccountId,
+                  externalThreadId: getCanonicalExternalThreadId("INSTAGRAM", customerIgsid),
+                  externalMessageId: subMessageId,
+                  senderExternalId: customerIgsid,
+                  senderName: isEcho ? "Store Owner" : (msgEvent.senderName || `Instagram User (${customerIgsid?.substring(0, 6) || "Guest"})`),
+                  direction: isEcho ? "OUTBOUND" : "INBOUND",
+                  messageType,
+                  textContent: resolvedText || (messageType === "IMAGE" ? "📷 Sent a photo" : "[Attachment]"),
+                  mediaUrl,
+                  mediaType,
+                  mediaMetadata,
+                  rawPayload: msgEvent,
+                  timestamp: time,
+                });
+              });
             }
-
-            if (!resolvedText) {
-              resolvedText = "[Empty message]";
-            }
-
-            events.push({
-              platform: "INSTAGRAM",
-              externalAccountId: igAccountId,
-              externalThreadId: getCanonicalExternalThreadId("INSTAGRAM", customerIgsid),
-              externalMessageId: messageId,
-              senderExternalId: customerIgsid,
-              senderName: isEcho ? "Store Owner" : (msgEvent.senderName || `Instagram User (${customerIgsid?.substring(0, 6) || "Guest"})`),
-              direction: isEcho ? "OUTBOUND" : "INBOUND",
-              messageType,
-              textContent: resolvedText,
-              mediaUrl,
-              mediaType,
-              mediaMetadata,
-              rawPayload: msgEvent,
-              timestamp: time,
-            });
           }
         }
       }
