@@ -350,6 +350,38 @@ export default function UnifiedInboxPage() {
     platforms?: Record<string, any>;
   } | null>(null);
 
+  const isAutoSyncingRef = useRef(false);
+
+  // Background Auto-Sync Reconciler (Runs silently without blocking UI)
+  const triggerBackgroundChannelSync = async () => {
+    if (isAutoSyncingRef.current || inboxMode !== "LIVE") return;
+    isAutoSyncingRef.current = true;
+    try {
+      const res = await fetch("/api/channels/sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          platform: "ALL",
+          environment: "LIVE",
+          background: true,
+          pullFromMeta: true,
+          limit: 10,
+        }),
+      });
+      const data = await res.json();
+      if (data.success && data.syncedCount > 0) {
+        fetchConversations(true);
+        if (activeConvIdRef.current) {
+          fetchActiveConversation(activeConvIdRef.current, true);
+        }
+      }
+    } catch {
+      // Silent catch for background reconciler
+    } finally {
+      isAutoSyncingRef.current = false;
+    }
+  };
+
   const handleSyncChannels = async (targetPlatform?: string) => {
     if (syncingChannels || inboxMode !== "LIVE") return;
     setSyncingChannels(true);
@@ -1062,10 +1094,13 @@ export default function UnifiedInboxPage() {
 
     const handleWakeupSync = () => {
       if (typeof document !== "undefined" && !document.hidden) {
-        // Tab restored / app focused / network restored -> immediate delta sync
+        // Tab restored / app focused / network restored -> immediate delta sync + channel sync
         fetchConversations(true);
         if (activeConvIdRef.current) {
           fetchActiveConversation(activeConvIdRef.current, true);
+        }
+        if (inboxMode === "LIVE") {
+          triggerBackgroundChannelSync();
         }
       }
     };
@@ -1084,12 +1119,15 @@ export default function UnifiedInboxPage() {
         broadcastChannelRef.current.close();
       }
     };
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [inboxMode]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Initial Load
+  // Initial Load & Channel Bootstrap
   useEffect(() => {
     fetchConversations(false);
     fetchProducts();
+    if (inboxMode === "LIVE") {
+      triggerBackgroundChannelSync();
+    }
   }, [inboxMode, platformFilter, leadFilter]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ─── Dedicated Active Thread Delta Poller (1.5s interval) ───────────────────
@@ -1120,6 +1158,18 @@ export default function UnifiedInboxPage() {
 
     return () => clearInterval(listInterval);
   }, [inboxMode, platformFilter, leadFilter]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ─── Background Channel Sync (8.0s interval) ─────────────────────────────────
+  useEffect(() => {
+    if (inboxMode !== "LIVE") return;
+
+    const channelSyncInterval = setInterval(() => {
+      if (typeof document !== "undefined" && document.hidden) return;
+      triggerBackgroundChannelSync();
+    }, 8000);
+
+    return () => clearInterval(channelSyncInterval);
+  }, [inboxMode]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Auto-scroll to bottom of messages
   useEffect(() => {
