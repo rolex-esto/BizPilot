@@ -218,6 +218,11 @@ export default function UnifiedInboxPage() {
   const [sending, setSending] = useState(false);
   const [products, setProducts] = useState<Product[]>([]);
 
+  // Message Restoration & Pagination State
+  const [loadingThreadId, setLoadingThreadId] = useState<string | null>(null);
+  const [hasMoreOlder, setHasMoreOlder] = useState<boolean>(false);
+  const [loadingOlder, setLoadingOlder] = useState<boolean>(false);
+
   // Local-First Pending Attachment & Menu State
   const [pendingAttachment, setPendingAttachment] = useState<PendingAttachment | null>(null);
   const [showAttachMenu, setShowAttachMenu] = useState(false);
@@ -707,6 +712,9 @@ export default function UnifiedInboxPage() {
           const conv = data.conversation as Conversation;
           const messages = conv.messages || [];
 
+          setHasMoreOlder(Boolean(data.hasMoreOlder));
+          setLoadingThreadId(null);
+
           convMessagesCacheRef.current.set(id, messages);
           if (messages.length > 0) {
             lastKnownActiveMsgTimestampRef.current = messages[messages.length - 1].sentAt;
@@ -725,10 +733,11 @@ export default function UnifiedInboxPage() {
         activeFetchAbortRef.current = null;
       }
       isFetchingActiveThreadRef.current = false;
+      setLoadingThreadId((current) => (current === id ? null : current));
     }
   };
 
-  // ─── Fast & Responsive Customer Selection ────────────────────────────────────
+  // ─── Fast & Responsive Customer Selection (Instant 0ms Stale-While-Revalidate) ─
   const handleSelectConversation = (conv: Conversation) => {
     if (!conv?.id) return;
     if (activeConvId === conv.id) return;
@@ -747,9 +756,16 @@ export default function UnifiedInboxPage() {
     lastKnownActiveMsgTimestampRef.current = null;
 
     // 3. Instant Cache Retrieval (0ms UI latency)
-    const cachedMessages = convMessagesCacheRef.current.get(conv.id) || conv.messages || [];
+    const hasCached = convMessagesCacheRef.current.has(conv.id);
+    const cachedMessages = convMessagesCacheRef.current.get(conv.id) || (conv.messages && conv.messages.length > 1 ? conv.messages : []);
     if (cachedMessages.length > 0) {
       lastKnownActiveMsgTimestampRef.current = cachedMessages[cachedMessages.length - 1].sentAt;
+    }
+
+    if (!hasCached && cachedMessages.length === 0) {
+      setLoadingThreadId(conv.id);
+    } else {
+      setLoadingThreadId(null);
     }
 
     setActiveConv({
@@ -759,8 +775,48 @@ export default function UnifiedInboxPage() {
     setReplyText("");
     cleanupPendingAttachment();
 
-    // 4. Launch full fresh thread & order details fetch
+    // 4. Launch full fresh thread & order details fetch asynchronously
     fetchActiveConversation(conv.id, false, nextGen);
+  };
+
+  // ─── Load Older Messages (Pagination) ────────────────────────────────────────
+  const handleLoadOlderMessages = async () => {
+    if (!activeConvId || loadingOlder || !hasMoreOlder) return;
+    const currentMessages = activeConv?.messages || [];
+    if (currentMessages.length === 0) return;
+    const oldestTimestamp = currentMessages[0].sentAt;
+
+    setLoadingOlder(true);
+    try {
+      const res = await fetch(
+        `/api/conversations/${activeConvId}?before=${encodeURIComponent(oldestTimestamp)}&limit=50`,
+        {
+          cache: "no-store",
+          headers: { "Cache-Control": "no-cache" },
+        }
+      );
+      const data = await res.json();
+      if (data.status === "success" && data.conversation?.messages) {
+        const olderMessages: Message[] = data.conversation.messages;
+        setHasMoreOlder(Boolean(data.hasMoreOlder));
+        setActiveConv((prev) => {
+          if (!prev || prev.id !== activeConvId) return prev;
+          const existing = prev.messages || [];
+          const map = new Map<string, Message>();
+          olderMessages.forEach((m) => map.set(m.id, m));
+          existing.forEach((m) => map.set(m.id, m));
+          const merged = Array.from(map.values()).sort(
+            (a, b) => new Date(a.sentAt).getTime() - new Date(b.sentAt).getTime()
+          );
+          convMessagesCacheRef.current.set(activeConvId, merged);
+          return { ...prev, messages: merged };
+        });
+      }
+    } catch (err) {
+      console.error("Error loading older messages:", err);
+    } finally {
+      setLoadingOlder(false);
+    }
   };
 
   // ─── Local-First Attachment Lifecycle ────────────────────────────────────────
@@ -1588,7 +1644,44 @@ export default function UnifiedInboxPage() {
 
               {/* Message Thread History */}
               <div className="flex-1 overflow-y-auto p-3.5 space-y-3 bg-slate-50/50">
-                {activeConv.messages?.length === 0 ? (
+                {/* Load Older Messages Action */}
+                {hasMoreOlder && (
+                  <div className="text-center pb-2">
+                    <button
+                      type="button"
+                      onClick={handleLoadOlderMessages}
+                      disabled={loadingOlder}
+                      className="px-3 py-1 bg-white hover:bg-slate-100 border border-slate-200 rounded-full text-[11px] font-bold text-slate-600 shadow-2xs transition-colors inline-flex items-center gap-1.5 disabled:opacity-60"
+                    >
+                      {loadingOlder ? (
+                        <>
+                          <Loader2 className="w-3 h-3 animate-spin text-sky-600" />
+                          <span>Loading older messages...</span>
+                        </>
+                      ) : (
+                        <span>↑ Load earlier messages</span>
+                      )}
+                    </button>
+                  </div>
+                )}
+
+                {loadingThreadId === activeConv.id && (!activeConv.messages || activeConv.messages.length === 0) ? (
+                  /* Smooth Instant Skeleton Chat Bubbles for Uncached Thread */
+                  <div className="space-y-3 py-2 animate-pulse">
+                    <div className="flex flex-col items-start max-w-[70%]">
+                      <div className="h-10 w-48 bg-slate-200/70 rounded-2xl rounded-tl-xs" />
+                      <div className="h-2.5 w-16 bg-slate-200/50 rounded mt-1" />
+                    </div>
+                    <div className="flex flex-col items-end max-w-[70%] ml-auto">
+                      <div className="h-12 w-56 bg-sky-200/50 rounded-2xl rounded-tr-xs" />
+                      <div className="h-2.5 w-14 bg-slate-200/50 rounded mt-1" />
+                    </div>
+                    <div className="flex flex-col items-start max-w-[60%]">
+                      <div className="h-8 w-40 bg-slate-200/70 rounded-2xl rounded-tl-xs" />
+                      <div className="h-2.5 w-12 bg-slate-200/50 rounded mt-1" />
+                    </div>
+                  </div>
+                ) : activeConv.messages?.length === 0 ? (
                   <div className="text-center py-12 text-xs text-slate-400">
                     No messages in this thread yet. Send a message below.
                   </div>
@@ -1620,6 +1713,7 @@ export default function UnifiedInboxPage() {
                                   <img
                                     src={mediaUrl}
                                     alt="Attachment"
+                                    loading="lazy"
                                     referrerPolicy="no-referrer"
                                     onClick={() => setLightboxMedia({ url: mediaUrl, title: isCustomer ? activeConv.customer.name : "Store Owner", type: "IMAGE" })}
                                     className="max-h-60 w-full object-cover rounded-xl cursor-zoom-in transition-transform duration-200 group-hover:scale-102"

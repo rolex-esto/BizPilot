@@ -76,7 +76,19 @@ export async function GET(req: NextRequest, { params }: { params: { id: string }
       }
     }
 
-    // 2. Full Conversation & Message Thread Query
+    // 2. High-Performance Conversation & Paginated Message Thread Query
+    const limitParam = searchParams.get("limit");
+    const limit = limitParam ? Math.min(Math.max(parseInt(limitParam, 10), 1), 100) : 50;
+    const beforeParam = searchParams.get("before");
+
+    const messageWhere: any = { conversationId };
+    if (beforeParam) {
+      const beforeDate = new Date(isNaN(Number(beforeParam)) ? beforeParam : Number(beforeParam));
+      if (!isNaN(beforeDate.getTime())) {
+        messageWhere.sentAt = { lt: beforeDate };
+      }
+    }
+
     const conversation = await prisma.conversation.findUnique({
       where: { id: conversationId },
       include: {
@@ -85,16 +97,15 @@ export async function GET(req: NextRequest, { params }: { params: { id: string }
             orders: {
               include: { items: true, payments: true },
               orderBy: { createdAt: "desc" },
+              take: 5,
             },
             leads: {
               include: { interestedProduct: true },
               orderBy: { createdAt: "desc" },
+              take: 5,
             },
             identityLinks: true,
           },
-        },
-        messages: {
-          orderBy: { sentAt: "asc" },
         },
       },
     });
@@ -105,8 +116,18 @@ export async function GET(req: NextRequest, { params }: { params: { id: string }
 
     // Strict multi-tenant isolation: Owner can only view their own store's conversation
     if (user?.role !== "ADMIN" && conversation.businessId !== businessId) {
-      return NextResponse.json({ error: "Conversation not found" }, { status: 404 });
+      return NextResponse.json({ error: "Conversation not found" }, { status: 403 });
     }
+
+    // Retrieve latest N messages efficiently
+    const rawMessages = await prisma.message.findMany({
+      where: messageWhere,
+      orderBy: { sentAt: "desc" },
+      take: limit + 1,
+    });
+
+    const hasMoreOlder = rawMessages.length > limit;
+    const paginatedMessages = (hasMoreOlder ? rawMessages.slice(0, limit) : rawMessages).reverse();
 
     // Mark unread messages as read
     if (conversation.unreadCount > 0) {
@@ -123,8 +144,17 @@ export async function GET(req: NextRequest, { params }: { params: { id: string }
     return NextResponse.json({
       status: "success",
       hasUpdates: true,
+      hasMoreOlder,
       serverTimestamp,
-      conversation,
+      conversation: {
+        ...conversation,
+        unreadCount: 0,
+        messages: paginatedMessages,
+      },
+    }, {
+      headers: {
+        "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
+      },
     });
   } catch (error: any) {
     return NextResponse.json({ error: error.message }, { status: 500 });
