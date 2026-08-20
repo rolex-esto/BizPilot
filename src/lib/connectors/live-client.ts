@@ -477,4 +477,152 @@ export class LivePlatformApiClient {
       };
     }
   }
+
+  /**
+   * Fetches customer public profile (name, first_name, last_name, avatar) from official platform Graph API.
+   * Scoped strictly to the Page-Scoped ID (PSID) / IGSID within the connected business account context.
+   */
+  public async fetchUserProfile(
+    platform: SupportedPlatform,
+    rawToken: string | null | undefined,
+    externalId: string
+  ): Promise<UserProfileLookupResult> {
+    if (!externalId || !rawToken || rawToken.startsWith("sim_") || rawToken === "none") {
+      return {
+        success: false,
+        platform,
+        platformUserId: externalId,
+        source: "FALLBACK",
+        isFallback: true,
+      };
+    }
+
+    if (platform === "FACEBOOK") {
+      try {
+        const fetchToUse = this.config.fetchFn || globalThis.fetch;
+        const endpoint = `${this.config.metaBaseUrl}/${this.config.graphApiVersion}/${encodeURIComponent(externalId)}?fields=name,first_name,last_name,profile_pic&access_token=${encodeURIComponent(rawToken)}`;
+        
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), this.config.timeoutMs || 5000);
+
+        const res = await fetchToUse(endpoint, {
+          method: "GET",
+          signal: controller.signal,
+          headers: {
+            "Accept": "application/json",
+            "User-Agent": "BizPilot-Profile-Resolver/1.0",
+          },
+        });
+        clearTimeout(timeoutId);
+
+        const data = await res.json().catch(() => ({}));
+        if (res.ok && data && (data.name || data.first_name)) {
+          const fullName = data.name || [data.first_name, data.last_name].filter(Boolean).join(" ");
+          return {
+            success: true,
+            platform: "FACEBOOK",
+            platformUserId: externalId,
+            name: fullName,
+            firstName: data.first_name,
+            lastName: data.last_name,
+            avatarUrl: data.profile_pic,
+            source: "GRAPH_API_USER_PROFILE",
+            isFallback: false,
+          };
+        }
+
+        return {
+          success: false,
+          platform: "FACEBOOK",
+          platformUserId: externalId,
+          source: "FALLBACK",
+          isFallback: true,
+          errorMessage: data?.error?.message || `HTTP ${res.status}`,
+        };
+      } catch (err: any) {
+        return {
+          success: false,
+          platform: "FACEBOOK",
+          platformUserId: externalId,
+          source: "FALLBACK",
+          isFallback: true,
+          errorMessage: err.message,
+        };
+      }
+    }
+
+    if (platform === "INSTAGRAM") {
+      try {
+        const fetchToUse = this.config.fetchFn || globalThis.fetch;
+        const endpoint = `${this.config.metaBaseUrl}/${this.config.graphApiVersion}/${encodeURIComponent(externalId)}?fields=name,username,profile_pic&access_token=${encodeURIComponent(rawToken)}`;
+        
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), this.config.timeoutMs || 5000);
+
+        const res = await fetchToUse(endpoint, {
+          method: "GET",
+          signal: controller.signal,
+          headers: {
+            "Accept": "application/json",
+            "User-Agent": "BizPilot-Profile-Resolver/1.0",
+          },
+        });
+        clearTimeout(timeoutId);
+
+        const data = await res.json().catch(() => ({}));
+        if (res.ok && data && (data.name || data.username)) {
+          return {
+            success: true,
+            platform: "INSTAGRAM",
+            platformUserId: externalId,
+            name: data.name || data.username,
+            handle: data.username ? `@${data.username}` : undefined,
+            avatarUrl: data.profile_pic,
+            source: "GRAPH_API_USER_PROFILE",
+            isFallback: false,
+          };
+        }
+
+        return {
+          success: false,
+          platform: "INSTAGRAM",
+          platformUserId: externalId,
+          source: "FALLBACK",
+          isFallback: true,
+          errorMessage: data?.error?.message || `HTTP ${res.status}`,
+        };
+      } catch (err: any) {
+        return {
+          success: false,
+          platform: "INSTAGRAM",
+          platformUserId: externalId,
+          source: "FALLBACK",
+          isFallback: true,
+          errorMessage: err.message,
+        };
+      }
+    }
+
+    return {
+      success: false,
+      platform,
+      platformUserId: externalId,
+      source: "FALLBACK",
+      isFallback: true,
+    };
+  }
+}
+
+export interface UserProfileLookupResult {
+  success: boolean;
+  platform: SupportedPlatform;
+  platformUserId: string;
+  name?: string;
+  firstName?: string;
+  lastName?: string;
+  handle?: string;
+  avatarUrl?: string;
+  source: "GRAPH_API_USER_PROFILE" | "WEBHOOK_PAYLOAD" | "FALLBACK";
+  isFallback: boolean;
+  errorMessage?: string;
 }

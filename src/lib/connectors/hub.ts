@@ -2,6 +2,8 @@ import { prisma } from "../prisma";
 import { NormalizedMessageEvent } from "./types";
 import { AiClassifier } from "../ai/classifier";
 import { GroundedAiSuggestor } from "../ai/grounded-suggestor";
+import { TokenVault } from "./token-vault";
+import { SocialIdentityResolver, isFallbackCustomerName } from "./identity-resolver";
 
 export interface IngestionResult {
   isDuplicate: boolean;
@@ -21,6 +23,7 @@ export class MessageHub {
    */
   public static async ingestMessage(event: NormalizedMessageEvent): Promise<IngestionResult> {
     let platformConnectionId: string | undefined;
+    let rawPageToken: string | null = null;
 
     // 1. Resolve Target Business & Platform Connection via externalAccountId
     let businessId = event.businessId;
@@ -36,6 +39,9 @@ export class MessageHub {
       if (conn) {
         businessId = conn.businessId;
         platformConnectionId = conn.id;
+        if (conn.accessTokenEncrypted) {
+          rawPageToken = TokenVault.decrypt(conn.accessTokenEncrypted);
+        }
       }
     }
 
@@ -79,7 +85,9 @@ export class MessageHub {
     });
 
     if (!customer) {
-      // Create new customer profile strictly in this environment
+      // Resolve best legitimate identity via official Platform Graph API or Webhook
+      const resolved = await SocialIdentityResolver.resolveIdentity(event, rawPageToken);
+
       customer = await prisma.customer.create({
         data: {
           businessId,
@@ -87,14 +95,34 @@ export class MessageHub {
           primaryPlatform: event.platform,
           source: environment === "PRACTICE" ? "SIMULATOR" : event.platform,
           externalId: event.senderExternalId,
-          name: event.senderName || (environment === "PRACTICE" ? "Practice Customer" : `${event.platform} User`),
-          handle: event.senderHandle,
-          phone: event.senderPhone,
-          email: event.senderEmail,
+          name: resolved.name,
+          handle: resolved.handle || event.senderHandle,
+          avatarUrl: resolved.avatarUrl,
+          phone: resolved.phone || event.senderPhone,
+          email: resolved.email || event.senderEmail,
           leadScore: 50,
           leadStatus: "WARM",
         },
       });
+    } else if (isFallbackCustomerName(customer.name) && rawPageToken) {
+      // Existing customer has a generic fallback ("Facebook User (377892)").
+      // Re-query platform Graph API to upgrade to their legitimate display name if available.
+      try {
+        const resolved = await SocialIdentityResolver.resolveIdentity(event, rawPageToken);
+        if (!resolved.isFallback && resolved.name && resolved.name !== customer.name) {
+          await prisma.customer.update({
+            where: { id: customer.id },
+            data: {
+              name: resolved.name,
+              handle: resolved.handle || customer.handle,
+              avatarUrl: resolved.avatarUrl || customer.avatarUrl,
+            },
+          });
+          customer.name = resolved.name;
+        }
+      } catch {
+        // Preserves existing customer state if lookup fails
+      }
     }
 
     // 4. Conversation Thread Resolution (Environment-Scoped)

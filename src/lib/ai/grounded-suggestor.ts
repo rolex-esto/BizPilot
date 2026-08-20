@@ -1,3 +1,4 @@
+import { formatCustomerGreetingName } from "../connectors/identity-resolver";
 import { prisma } from "../prisma";
 import { ClassificationResult } from "./classifier";
 
@@ -62,7 +63,7 @@ export class GroundedAiSuggestor {
       ? settings.fulfillmentMethods
       : ["MEETUP", "LBC", "GRAB", "LALAMOVE", "DELIVERY"];
 
-    const firstName = customerName.split(" ")[0] || "Customer";
+    const greetingTarget = formatCustomerGreetingName(customerName);
     const lowerMessage = messageText.toLowerCase();
     const formatPhp = (amt: number) =>
       `₱${amt.toLocaleString("en-PH", { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
@@ -74,7 +75,7 @@ export class GroundedAiSuggestor {
     // 1a. International delivery inquiry
     if (lowerMessage.includes("international") || lowerMessage.includes("ship to us") || lowerMessage.includes("ship to canada") || lowerMessage.includes("abroad")) {
       return {
-        suggestedText: `Hello po ${firstName}! We currently ship nationwide within the Philippines only via ${fulfillmentOptions.includes("LBC") ? "LBC and partner couriers" : "local couriers"}. Let me check with the store owner if international shipping can be arranged for you.`,
+        suggestedText: `Hello po${greetingTarget}! We currently ship nationwide within the Philippines only via ${fulfillmentOptions.includes("LBC") ? "LBC and partner couriers" : "local couriers"}. Let me check with the store owner if international shipping can be arranged for you.`,
         sourceOfTruth: {
           productFound: false,
           fulfillmentMethodsFound: fulfillmentOptions,
@@ -89,7 +90,7 @@ export class GroundedAiSuggestor {
     // 1b. Unrealistic / Non-standard Warranty or Return Inquiries
     if (lowerMessage.includes("3-year warranty") || lowerMessage.includes("3 year warranty") || lowerMessage.includes("10-year") || lowerMessage.includes("90 days") || lowerMessage.includes("return after 90")) {
       return {
-        suggestedText: `Hello po ${firstName}! Our standard store policy covers replacement warranty for verified defects upon delivery. For extended warranty or custom return terms, I'll connect you directly with our store owner.`,
+        suggestedText: `Hello po${greetingTarget}! Our standard store policy covers replacement warranty for verified defects upon delivery. For extended warranty or custom return terms, I'll connect you directly with our store owner.`,
         sourceOfTruth: {
           productFound: false,
           requiresOwnerEscalation: true,
@@ -103,7 +104,7 @@ export class GroundedAiSuggestor {
     // 1c. Deferred / Delayed payment ("pay tomorrow", "pay next month")
     if (lowerMessage.includes("pay tomorrow") || lowerMessage.includes("bayad bukas") || lowerMessage.includes("next week bayad") || lowerMessage.includes("pay after")) {
       return {
-        suggestedText: `Hello po ${firstName}! Orders are normally secured once payment is confirmed or scheduled for COD/Meetup. Let me check with the store owner if we can hold this item for you until tomorrow!`,
+        suggestedText: `Hello po${greetingTarget}! Orders are normally secured once payment is confirmed or scheduled for COD/Meetup. Let me check with the store owner if we can hold this item for you until tomorrow!`,
         sourceOfTruth: {
           productFound: false,
           paymentMethodsFound: acceptedPayments,
@@ -135,7 +136,7 @@ export class GroundedAiSuggestor {
 
       if (matchedOrder) {
         return {
-          suggestedText: `Hello po ${firstName}! Verified na po ang inyong payment (Ref: ${refNumber}) for Order ${matchedOrder.orderNumber}. We will prepare your items for dispatch. Maraming salamat po!`,
+          suggestedText: `Hello po${greetingTarget}! Verified na po ang inyong payment (Ref: ${refNumber}) for Order ${matchedOrder.orderNumber}. We will prepare your items for dispatch. Maraming salamat po!`,
           sourceOfTruth: {
             productFound: true,
             orderFound: true,
@@ -147,7 +148,7 @@ export class GroundedAiSuggestor {
       }
 
       return {
-        suggestedText: `Hello po ${firstName}! Thank you for sending your payment confirmation${refNumber ? ` (Ref: ${refNumber})` : ""}. Checking our verified records now to confirm receipt and process your dispatch. Sandali lang po!`,
+        suggestedText: `Hello po${greetingTarget}! Thank you for sending your payment confirmation${refNumber ? ` (Ref: ${refNumber})` : ""}. Checking our verified records now to confirm receipt and process your dispatch. Sandali lang po!`,
         sourceOfTruth: {
           productFound: false,
           orderFound: false,
@@ -177,10 +178,10 @@ export class GroundedAiSuggestor {
       let responseText = "";
       if (asksGcash) {
         responseText = gcashAccepted
-          ? `Hello po ${firstName}! Yes po, we accept GCash! We also accept ${acceptedPayments.filter((p) => p !== "GCASH").map((p) => paymentLabels[p] || p).join(", ")}. Would you like our payment details?`
-          : `Hello po ${firstName}! Currently we accept ${formattedList}. Let us know which payment method works best for you!`;
+          ? `Hello po${greetingTarget}! Yes po, we accept GCash! We also accept ${acceptedPayments.filter((p) => p !== "GCASH").map((p) => paymentLabels[p] || p).join(", ")}. Would you like our payment details?`
+          : `Hello po${greetingTarget}! Currently we accept ${formattedList}. Let us know which payment method works best for you!`;
       } else {
-        responseText = `Hello po ${firstName}! We accept the following payment methods: ${formattedList}. Let us know how you'd like to settle your order!`;
+        responseText = `Hello po${greetingTarget}! We accept the following payment methods: ${formattedList}. Let us know how you'd like to settle your order!`;
       }
 
       return {
@@ -204,7 +205,7 @@ export class GroundedAiSuggestor {
 
       if (requestedPercent && requestedPercent > 20) {
         return {
-          suggestedText: `Hello po ${firstName}! Our prices are already set to competitive direct-to-buyer rates. A ${requestedPercent}% discount is beyond our standard pricing guidelines, but let me check with the store owner if we can offer a bundle deal or lower shipping for you!`,
+          suggestedText: `Hello po${greetingTarget}! Our prices are already set to competitive direct-to-buyer rates. A ${requestedPercent}% price reduction is beyond our standard pricing guidelines, but let me check with the store owner if we can offer a bundle deal or lower shipping for you!`,
           sourceOfTruth: {
             productFound: false,
             requiresOwnerEscalation: true,
@@ -216,7 +217,7 @@ export class GroundedAiSuggestor {
       }
 
       return {
-        suggestedText: `Hello po ${firstName}! I'll check with the store owner if we can give you a special discount or package deal for this item. Anong item po ang balak ninyong kunin?`,
+        suggestedText: `Hello po${greetingTarget}! I'll check with the store owner if we can give you a special discount or package deal for this item. Anong item po ang balak ninyong kunin?`,
         sourceOfTruth: {
           productFound: false,
           requiresOwnerEscalation: true,
@@ -289,7 +290,7 @@ export class GroundedAiSuggestor {
 
       if (isOutOfStock) {
         return {
-          suggestedText: `Hello po ${firstName}! As per our current inventory, the ${matchedProduct.name} is currently out of stock. Would you like us to notify you as soon as new stock arrives?`,
+          suggestedText: `Hello po${greetingTarget}! As per our current inventory, the ${matchedProduct.name} is currently out of stock. Would you like us to notify you as soon as new stock arrives?`,
           sourceOfTruth: {
             productFound: true,
             productName: matchedProduct.name,
@@ -312,7 +313,7 @@ export class GroundedAiSuggestor {
           : fulfillmentOptions.join(", ");
 
         return {
-          suggestedText: `Hello po ${firstName}! Yes po, available ang ${matchedProduct.name} for ${formatPhp(matchedProduct.price)} ${stockNote}. We offer delivery via ${fulfillmentList}. Would you like to reserve or place an order po?`,
+          suggestedText: `Hello po${greetingTarget}! Yes po, available ang ${matchedProduct.name} for ${formatPhp(matchedProduct.price)} ${stockNote}. We offer delivery via ${fulfillmentList}. Would you like to reserve or place an order po?`,
           sourceOfTruth: {
             productFound: true,
             productName: matchedProduct.name,
@@ -329,7 +330,7 @@ export class GroundedAiSuggestor {
       if (classification.intent === "PURCHASE_INTENT") {
         const paymentList = acceptedPayments.join(", ");
         return {
-          suggestedText: `Yes po ${firstName}! We can reserve the ${matchedProduct.name} (${formatPhp(matchedProduct.price)}) for you right away. May we have your complete Delivery Name, Address, and Contact Number po? We accept ${paymentList}.`,
+          suggestedText: `Yes po${greetingTarget}! We can reserve the ${matchedProduct.name} (${formatPhp(matchedProduct.price)}) for you right away. May we have your complete Delivery Name, Address, and Contact Number po? We accept ${paymentList}.`,
           sourceOfTruth: {
             productFound: true,
             productName: matchedProduct.name,
@@ -358,7 +359,7 @@ export class GroundedAiSuggestor {
       const formattedFulfillment = fulfillmentOptions.map((f) => fulfillmentLabels[f] || f).join(", ");
 
       return {
-        suggestedText: `Hello po ${firstName}! We offer the following delivery options: ${formattedFulfillment}. We are located in ${business?.address || "Metro Manila"}. May we know your delivery location?`,
+        suggestedText: `Hello po${greetingTarget}! We offer the following delivery options: ${formattedFulfillment}. We are located in ${business?.address || "Metro Manila"}. May we know your delivery location?`,
         sourceOfTruth: {
           productFound: false,
           fulfillmentMethodsFound: fulfillmentOptions,
@@ -373,7 +374,7 @@ export class GroundedAiSuggestor {
     // ------------------------------------------------------------
     if (classification.intent === "PRODUCT_INQUIRY" || classification.intent === "PRICE_INQUIRY") {
       return {
-        suggestedText: `Hello po ${firstName}! To give you the exact verified price and stock availability, could you specify the exact model or brand you are looking for?`,
+        suggestedText: `Hello po${greetingTarget}! To give you the exact verified price and stock availability, could you specify the exact model or brand you are looking for?`,
         sourceOfTruth: {
           productFound: false,
           missingDataNote: "Specific product was not matched in verified inventory. No price was fabricated.",
@@ -385,7 +386,7 @@ export class GroundedAiSuggestor {
 
     // Default Greeting / General Question
     return {
-      suggestedText: `Hello po ${firstName}! Welcome to ${business?.name || "our store"}. How can we assist you with your tech and gadget needs today?`,
+      suggestedText: `Hello po${greetingTarget}! Welcome to ${business?.name || "our store"}. How can we assist you with your tech and gadget needs today?`,
       sourceOfTruth: {
         productFound: false,
       },

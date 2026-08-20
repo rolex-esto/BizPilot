@@ -38,7 +38,7 @@ async function runFullQaSuite() {
   console.log("============================================================\n");
 
   // Step 0: Ensure business exists for test fixture execution
-  let business = await prisma.business.findFirst();
+  let business = await prisma.business.findFirst({ where: { name: "TechHaven Philippines" } });
   if (!business) {
     console.log("ℹ️ Clean database detected. Initializing temporary QA test fixtures...");
     business = await seedOnlineMsme();
@@ -577,21 +577,24 @@ async function runFullQaSuite() {
 
     // 1. "Boss available pa T480?"
     const ev1 = DeveloperSimulator.createSimulatedEvent("FACEBOOK", "Juan Dela Cruz", "Boss available pa T480?", {});
+    ev1.businessId = businessId;
     ev1.senderExternalId = scenarioCustExtId;
     const r1 = await MessageHub.ingestMessage(ev1);
 
     // 2. "HM?"
     const ev2 = DeveloperSimulator.createSimulatedEvent("FACEBOOK", "Juan Dela Cruz", "HM po ang last price?", {});
+    ev2.businessId = businessId;
     ev2.senderExternalId = scenarioCustExtId;
     const r2 = await MessageHub.ingestMessage(ev2);
 
     // 3. "Sige kukunin ko."
     const ev3 = DeveloperSimulator.createSimulatedEvent("FACEBOOK", "Juan Dela Cruz", "Sige boss kukunin ko na via Lalamove.", {});
+    ev3.businessId = businessId;
     ev3.senderExternalId = scenarioCustExtId;
     const r3 = await MessageHub.ingestMessage(ev3);
 
     // 4. Create Order from Lead
-    const custRecord = await prisma.customer.findFirst({ where: { businessId, externalId: scenarioCustExtId } });
+    const custRecord = await prisma.customer.findFirst({ where: { id: r1.customerId } });
     if (!custRecord) throw new Error("Scenario customer record not found");
 
     const scenarioOrderNumber = `ORD-SCENARIO-${Date.now().toString().slice(-4)}`;
@@ -616,6 +619,7 @@ async function runFullQaSuite() {
 
     // 5. "Sent GCash ref 12345."
     const ev4 = DeveloperSimulator.createSimulatedEvent("FACEBOOK", "Juan Dela Cruz", "Sent GCash ref 12345 po.", {});
+    ev4.businessId = businessId;
     ev4.senderExternalId = scenarioCustExtId;
     const r4 = await MessageHub.ingestMessage(ev4);
 

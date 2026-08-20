@@ -23,7 +23,7 @@ export interface NormalizedMessageEvent {
   externalThreadId?: string;
   externalMessageId: string;
   senderExternalId: string;
-  senderName: string;
+  senderName?: string;
   senderHandle?: string;
   senderPhone?: string;
   senderEmail?: string;
