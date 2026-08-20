@@ -17,6 +17,9 @@ export async function GET(req: NextRequest) {
   }
 
   const businessId = user.businessId;
+  const searchParams = req.nextUrl.searchParams;
+  const envParam = searchParams.get("environment") || searchParams.get("mode");
+  const environment = envParam?.toUpperCase() === "PRACTICE" ? "PRACTICE" : "LIVE";
   const encoder = new TextEncoder();
 
   let unsubscribe: (() => void) | null = null;
@@ -24,23 +27,28 @@ export async function GET(req: NextRequest) {
 
   const stream = new ReadableStream({
     start(controller) {
-      // 1. Send initial connection confirmation
+      // 1. Send initial connection confirmation with explicit environment scoping
       const initPayload = JSON.stringify({
         type: "connected",
         businessId,
+        environment,
         timestamp: new Date().toISOString(),
       });
       controller.enqueue(encoder.encode(`data: ${initPayload}\n\n`));
 
-      // 2. Subscribe to realtime broadcaster
-      unsubscribe = RealtimeBroadcaster.subscribe(businessId, (event: RealtimeMessageEvent) => {
-        try {
-          const messageData = JSON.stringify(event);
-          controller.enqueue(encoder.encode(`data: ${messageData}\n\n`));
-        } catch {
-          // Stream closed by client
-        }
-      });
+      // 2. Subscribe to realtime broadcaster with environment filter
+      unsubscribe = RealtimeBroadcaster.subscribe(
+        businessId,
+        (event: RealtimeMessageEvent) => {
+          try {
+            const messageData = JSON.stringify(event);
+            controller.enqueue(encoder.encode(`data: ${messageData}\n\n`));
+          } catch {
+            // Stream closed by client
+          }
+        },
+        environment
+      );
 
       // 3. Keep-alive heartbeat every 15 seconds
       heartbeatTimer = setInterval(() => {

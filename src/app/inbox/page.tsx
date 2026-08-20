@@ -230,16 +230,38 @@ export default function UnifiedInboxPage() {
   const formatPhp = (amt: number) =>
     `₱${amt.toLocaleString("en-PH", { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
 
-  const fetchConversations = async () => {
+  const switchInboxMode = (newMode: "LIVE" | "PRACTICE") => {
+    if (newMode === inboxMode) return;
+    // 1. Immediately wipe all conversation & chat state so stale data vanishes instantly
+    setConversations([]);
+    setActiveConvId(null);
+    setActiveConv(null);
+    setReplyText("");
+    setActiveToast(null);
+    knownTimestampsRef.current = {};
+    initialLoadDoneRef.current = false;
+    lastActiveMsgCountRef.current = {};
+    setLoading(true);
+
+    // 2. Switch mode and fetch fresh data
+    setInboxMode(newMode);
+    fetchConversations(newMode);
+  };
+
+  const fetchConversations = async (targetMode?: "LIVE" | "PRACTICE") => {
+    const currentMode = targetMode || inboxMode;
     try {
-      const res = await fetch(`/api/conversations?environment=${inboxMode}&platform=${platformFilter}&leadStatus=${leadFilter}`);
+      const res = await fetch(`/api/conversations?environment=${currentMode}&platform=${platformFilter}&leadStatus=${leadFilter}`);
       const data = await res.json();
       if (data.status === "success") {
-        const convList = data.conversations as Conversation[];
+        const convList = (data.conversations as Conversation[]) || [];
         setConversations(convList);
-        if (!activeConvId && convList.length > 0) {
-          setActiveConvId(convList[0].id);
-        }
+        setActiveConvId((prev) => {
+          if (!prev || !convList.some((c) => c.id === prev)) {
+            return convList.length > 0 ? convList[0].id : null;
+          }
+          return prev;
+        });
 
         // Check for new inbound customer message
         let hasNewInbound = false;
@@ -455,14 +477,19 @@ export default function UnifiedInboxPage() {
 
     if (typeof window !== "undefined" && "EventSource" in window) {
       try {
-        eventSource = new EventSource("/api/realtime");
+        eventSource = new EventSource(`/api/realtime?environment=${inboxMode}`);
 
         eventSource.onmessage = (e) => {
           try {
             const event = JSON.parse(e.data);
             if (event.type === "message.created") {
+              // Safety: ignore cross-environment events
+              if (event.environment && event.environment !== inboxMode) {
+                return;
+              }
+
               // Instantly refresh conversations list
-              fetchConversations();
+              fetchConversations(inboxMode);
 
               // If event belongs to currently active conversation, refresh message stream immediately
               if (activeConvId && event.conversationId === activeConvId) {
@@ -503,7 +530,7 @@ export default function UnifiedInboxPage() {
         eventSource.close();
       }
     };
-  }, [activeConvId]);
+  }, [inboxMode, activeConvId]);
 
   // Smooth auto-scroll to bottom whenever new messages arrive
   useEffect(() => {
@@ -662,7 +689,7 @@ export default function UnifiedInboxPage() {
           {/* Environment Mode Switcher */}
           <div className="flex items-center bg-slate-100 p-1 rounded-lg border border-slate-200">
             <button
-              onClick={() => { setInboxMode("LIVE"); setActiveConvId(null); }}
+              onClick={() => switchInboxMode("LIVE")}
               className={`px-2.5 py-1 rounded-md text-xs font-bold transition-colors flex items-center gap-1.5 ${
                 inboxMode === "LIVE"
                   ? "bg-white text-slate-900 shadow-2xs border border-slate-200/60"
@@ -673,7 +700,7 @@ export default function UnifiedInboxPage() {
               Live Channels
             </button>
             <button
-              onClick={() => { setInboxMode("PRACTICE"); setActiveConvId(null); }}
+              onClick={() => switchInboxMode("PRACTICE")}
               className={`px-2.5 py-1 rounded-md text-xs font-bold transition-colors flex items-center gap-1.5 ${
                 inboxMode === "PRACTICE"
                   ? "bg-purple-600 text-white shadow-2xs"
@@ -766,7 +793,7 @@ export default function UnifiedInboxPage() {
                 <RefreshCw className={`w-2.5 h-2.5 ${syncingChannels ? "animate-spin" : ""}`} />
                 {syncingChannels ? "Syncing..." : "Sync FB"}
               </button>
-              <button onClick={fetchConversations} className="text-slate-400 hover:text-slate-600 p-0.5" title="Refresh local inbox">
+              <button onClick={() => fetchConversations()} className="text-slate-400 hover:text-slate-600 p-0.5" title="Refresh local inbox">
                 <RefreshCw className="w-3.5 h-3.5" />
               </button>
             </div>

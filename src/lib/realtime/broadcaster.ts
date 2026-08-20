@@ -21,38 +21,51 @@ export interface RealtimeMessageEvent {
 }
 
 type Listener = (event: RealtimeMessageEvent) => void;
+interface Subscription {
+  listener: Listener;
+  environment: "LIVE" | "PRACTICE" | "ALL";
+}
 
 class RealtimeBroadcasterService {
-  private listeners: Map<string, Set<Listener>> = new Map();
+  private subscriptions: Map<string, Set<Subscription>> = new Map();
 
   /**
-   * Subscribes a client listener to realtime events for a specific businessId.
+   * Subscribes a client listener to realtime events for a specific businessId and environment.
    * Returns an unsubscribe function.
    */
-  public subscribe(businessId: string, listener: Listener): () => void {
-    if (!this.listeners.has(businessId)) {
-      this.listeners.set(businessId, new Set());
+  public subscribe(
+    businessId: string,
+    listener: Listener,
+    environment: "LIVE" | "PRACTICE" | "ALL" = "ALL"
+  ): () => void {
+    if (!this.subscriptions.has(businessId)) {
+      this.subscriptions.set(businessId, new Set());
     }
-    const businessListeners = this.listeners.get(businessId)!;
-    businessListeners.add(listener);
+    const businessSubs = this.subscriptions.get(businessId)!;
+    const sub: Subscription = { listener, environment };
+    businessSubs.add(sub);
 
     return () => {
-      businessListeners.delete(listener);
-      if (businessListeners.size === 0) {
-        this.listeners.delete(businessId);
+      businessSubs.delete(sub);
+      if (businessSubs.size === 0) {
+        this.subscriptions.delete(businessId);
       }
     };
   }
 
   /**
-   * Broadcasts an event strictly to subscribers of the matching businessId.
+   * Broadcasts an event strictly to subscribers of the matching businessId and environment.
    */
   public broadcast(event: RealtimeMessageEvent): void {
-    const businessListeners = this.listeners.get(event.businessId);
-    if (businessListeners && businessListeners.size > 0) {
-      businessListeners.forEach((listener) => {
+    const businessSubs = this.subscriptions.get(event.businessId);
+    if (businessSubs && businessSubs.size > 0) {
+      businessSubs.forEach((sub) => {
+        // Enforce strict environment matching
+        if (sub.environment !== "ALL" && event.environment && sub.environment !== event.environment) {
+          return;
+        }
         try {
-          listener(event);
+          sub.listener(event);
         } catch (err) {
           console.error("[REALTIME][BROADCASTER] Listener error:", err);
         }
@@ -64,7 +77,7 @@ class RealtimeBroadcasterService {
    * Returns count of active listeners for a business.
    */
   public getSubscriberCount(businessId: string): number {
-    return this.listeners.get(businessId)?.size || 0;
+    return this.subscriptions.get(businessId)?.size || 0;
   }
 }
 

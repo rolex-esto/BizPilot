@@ -99,3 +99,57 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 }
+
+/**
+ * DELETE /api/conversations/[id]
+ * 
+ * Truthful Deletion Handler:
+ * Deletes the conversation and its local message records from BizPilot.
+ * Clearly informs the owner that local deletion does NOT delete messages from Meta / Instagram / WhatsApp.
+ */
+export async function DELETE(req: NextRequest, { params }: { params: { id: string } }) {
+  try {
+    const { user, businessId, errorResponse } = await requireBusinessAuth(req);
+    if (errorResponse) return errorResponse;
+
+    const conversationId = params.id;
+
+    const conversation = await prisma.conversation.findUnique({
+      where: { id: conversationId },
+    });
+
+    if (!conversation) {
+      return NextResponse.json({ error: "Conversation not found" }, { status: 404 });
+    }
+
+    if (user?.role !== "ADMIN" && conversation.businessId !== businessId) {
+      return NextResponse.json({ error: "Conversation not found" }, { status: 404 });
+    }
+
+    // Delete associated messages, then the conversation
+    await prisma.$transaction([
+      prisma.message.deleteMany({ where: { conversationId } }),
+      prisma.conversation.delete({ where: { id: conversationId } }),
+      prisma.auditLog.create({
+        data: {
+          businessId: conversation.businessId,
+          action: "CONVERSATION_DELETED",
+          entityType: "Conversation",
+          entityId: conversationId,
+          details: `Deleted conversation ${conversationId} (${conversation.environment}) locally from BizPilot. Platform deletion not performed.`,
+          performedBy: user?.role === "ADMIN" ? "ADMIN" : "OWNER",
+        },
+      }),
+    ]);
+
+    return NextResponse.json({
+      status: "success",
+      deletedId: conversationId,
+      message: "Deleted from BizPilot only. The original messages remain on the connected social platform.",
+      platformDeletionSynchronized: false,
+    });
+  } catch (error: any) {
+    return NextResponse.json({ error: error.message }, { status: 500 });
+  }
+}
+

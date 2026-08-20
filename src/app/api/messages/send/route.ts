@@ -4,6 +4,7 @@ import { requireBusinessAuth } from "@/lib/auth/api-guard";
 import { TokenVault } from "@/lib/connectors/token-vault";
 import { LivePlatformApiClient } from "@/lib/connectors/live-client";
 import { SupportedPlatform } from "@/lib/connectors/types";
+import { RealtimeBroadcaster } from "@/lib/realtime/broadcaster";
 
 export const dynamic = "force-dynamic";
 
@@ -186,6 +187,20 @@ export async function POST(req: NextRequest) {
         lastMessagePreview: textContent.substring(0, 120),
         unreadCount: 0,
       },
+    });
+
+    // Broadcast realtime notification to active SSE listeners matching businessId & environment
+    RealtimeBroadcaster.broadcast({
+      type: "message.created",
+      businessId: conversation.businessId,
+      conversationId,
+      messageId: message.id,
+      platform: conversation.platform,
+      environment: environment as "LIVE" | "PRACTICE" | "TEST",
+      direction: "OUTBOUND",
+      preview: textContent.substring(0, 120),
+      senderName: "Store Owner",
+      sentAt: new Date().toISOString(),
     });
 
     // 7. Record Immutable Audit Log
