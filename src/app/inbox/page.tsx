@@ -216,6 +216,8 @@ export default function UnifiedInboxPage() {
 
   // Real-time Sound & Pop-up Notification State
   const [soundEnabled, setSoundEnabled] = useState(true);
+  const [syncState, setSyncState] = useState<"idle" | "syncing" | "success" | "error">("idle");
+  const [convsError, setConvsError] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const [activeToast, setActiveToast] = useState<{
     id: string;
@@ -404,8 +406,9 @@ export default function UnifiedInboxPage() {
   };
 
   const handleSyncChannels = async (targetPlatform?: string) => {
-    if (syncingChannels || inboxMode !== "LIVE") return;
+    if (syncingChannels || syncState === "syncing" || inboxMode !== "LIVE") return;
     setSyncingChannels(true);
+    setSyncState("syncing");
     try {
       const platformToSync = targetPlatform || platformFilter || "ALL";
       const res = await fetch("/api/channels/sync", {
@@ -420,6 +423,9 @@ export default function UnifiedInboxPage() {
       });
       const data = await res.json();
       if (data.success || data.status === "success") {
+        setSyncState("success");
+        setTimeout(() => setSyncState("idle"), 2500);
+
         const syncMsg = data.message || (data.syncedCount > 0 ? `Synced ${data.syncedCount} new message(s).` : "All channels are up to date.");
         setSyncStatusToast({
           message: syncMsg,
@@ -431,9 +437,14 @@ export default function UnifiedInboxPage() {
         if (activeConvIdRef.current) {
           fetchActiveConversation(activeConvIdRef.current, true);
         }
+      } else {
+        setSyncState("error");
+        setTimeout(() => setSyncState("idle"), 3500);
       }
     } catch (err) {
       console.error("Channel sync error:", err);
+      setSyncState("error");
+      setTimeout(() => setSyncState("idle"), 3500);
     } finally {
       setSyncingChannels(false);
     }
@@ -539,6 +550,9 @@ export default function UnifiedInboxPage() {
         return;
       }
 
+      if (!isBackgroundPoll) {
+        setConvsError(null);
+      }
       const data = await res.json();
 
       if (reqGen !== channelGenerationRef.current || targetPlatform !== activePlatformFilterRef.current) {
@@ -627,10 +641,15 @@ export default function UnifiedInboxPage() {
         if (activeConvHasUpdates && activeConvIdRef.current) {
           fetchActiveConversation(activeConvIdRef.current, true);
         }
+      } else if (!isBackgroundPoll) {
+        setConvsError(data.message || "Failed to load conversations.");
       }
     } catch (err: any) {
       if (err?.name === "AbortError") return;
       console.error("Error fetching conversations:", err);
+      if (!isBackgroundPoll) {
+        setConvsError("Unable to reach server. Please check your connection.");
+      }
     } finally {
       if (convFetchAbortRef.current === abortController) {
         convFetchAbortRef.current = null;
@@ -1461,42 +1480,85 @@ export default function UnifiedInboxPage() {
           {/* Top Platform Filter Tabs */}
           <div className="p-2.5 border-b border-slate-100 bg-slate-50 space-y-2">
             <div className="flex items-center justify-between">
-              <span className="text-xs font-bold text-slate-700">Inbox ({conversations.length})</span>
+              <span className="text-xs font-bold text-slate-700" aria-live="polite">
+                Inbox ({conversations.length})
+              </span>
               <div className="flex items-center gap-1.5">
                 <button
                   onClick={() => handleSyncChannels()}
-                  disabled={syncingChannels}
-                  className="px-2 py-0.5 bg-sky-50 text-sky-700 hover:bg-sky-100 border border-sky-200 rounded text-[10px] font-bold inline-flex items-center gap-1 transition-colors disabled:opacity-50"
+                  disabled={syncingChannels || syncState === "syncing"}
+                  aria-busy={syncingChannels || syncState === "syncing"}
+                  aria-label={
+                    syncState === "syncing"
+                      ? "Syncing channels"
+                      : platformFilter !== "ALL"
+                      ? `Sync ${platformFilter.charAt(0) + platformFilter.slice(1).toLowerCase()}`
+                      : "Sync Channels"
+                  }
+                  className={`px-2.5 py-1 rounded-lg text-[10px] font-bold inline-flex items-center gap-1.5 transition-all shadow-2xs border ${
+                    syncState === "syncing"
+                      ? "bg-sky-100 text-sky-800 border-sky-300 opacity-90 cursor-wait"
+                      : syncState === "success"
+                      ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                      : syncState === "error"
+                      ? "bg-rose-50 text-rose-700 border-rose-200"
+                      : "bg-white hover:bg-slate-50 text-slate-700 border-slate-200"
+                  } disabled:opacity-60`}
                   title={
                     platformFilter !== "ALL"
                       ? `Sync ${platformFilter.charAt(0) + platformFilter.slice(1).toLowerCase()} messages`
                       : "Sync connected social channels"
                   }
                 >
-                  <RefreshCw className={`w-2.5 h-2.5 ${syncingChannels ? "animate-spin" : ""}`} />
-                  {syncingChannels ? "Syncing..." : platformFilter !== "ALL" ? `Sync ${platformFilter === "FACEBOOK" ? "Facebook" : platformFilter === "INSTAGRAM" ? "Instagram" : platformFilter === "WHATSAPP" ? "WhatsApp" : "TikTok"}` : "Sync Channels"}
+                  {syncState === "syncing" ? (
+                    <>
+                      <Loader2 className="w-3 h-3 animate-spin text-sky-600 shrink-0" />
+                      <span>{platformFilter !== "ALL" ? `Syncing ${platformFilter === "FACEBOOK" ? "Facebook" : platformFilter === "INSTAGRAM" ? "Instagram" : platformFilter === "WHATSAPP" ? "WhatsApp" : "TikTok"}...` : "Syncing..."}</span>
+                    </>
+                  ) : syncState === "success" ? (
+                    <>
+                      <Check className="w-3 h-3 text-emerald-600 shrink-0" />
+                      <span>Synced</span>
+                    </>
+                  ) : syncState === "error" ? (
+                    <>
+                      <AlertCircle className="w-3 h-3 text-rose-600 shrink-0" />
+                      <span>Sync Failed</span>
+                    </>
+                  ) : (
+                    <>
+                      <RefreshCw className="w-3 h-3 text-slate-500 shrink-0" />
+                      <span>{platformFilter !== "ALL" ? `Sync ${platformFilter === "FACEBOOK" ? "Facebook" : platformFilter === "INSTAGRAM" ? "Instagram" : platformFilter === "WHATSAPP" ? "WhatsApp" : "TikTok"}` : "Sync Channels"}</span>
+                    </>
+                  )}
                 </button>
-                <button onClick={() => fetchConversations(false)} className="text-slate-400 hover:text-slate-600 p-0.5" title="Refresh local inbox">
-                  <RefreshCw className="w-3.5 h-3.5" />
+                <button
+                  onClick={() => fetchConversations(false)}
+                  disabled={loading}
+                  className="text-slate-400 hover:text-slate-600 p-1 rounded-lg hover:bg-slate-100 transition-colors disabled:opacity-50"
+                  title="Refresh local inbox"
+                  aria-label="Refresh local inbox"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin text-sky-600" : ""}`} />
                 </button>
               </div>
             </div>
 
             {/* Sync Feedback Toast */}
             {syncStatusToast && (
-              <div className="p-2 bg-sky-100 text-sky-950 border border-sky-200 rounded-lg text-[11px] flex items-center justify-between gap-1.5 animate-in fade-in">
+              <div className="p-2 bg-sky-100 text-sky-950 border border-sky-200 rounded-lg text-[11px] flex items-center justify-between gap-1.5 animate-in fade-in" role="status">
                 <div className="flex items-center gap-1 min-w-0">
                   <CheckCircle className="w-3 h-3 text-sky-600 shrink-0" />
                   <span className="font-semibold truncate">{syncStatusToast.message}</span>
                 </div>
-                <button onClick={() => setSyncStatusToast(null)} className="text-sky-600 hover:text-sky-800 p-0.5">
+                <button onClick={() => setSyncStatusToast(null)} className="text-sky-600 hover:text-sky-800 p-0.5" aria-label="Close message">
                   <X className="w-3 h-3" />
                 </button>
               </div>
             )}
 
             {/* Platform Filter Tabs (Real Brand Logos & Full Names) */}
-            <div className="flex items-center gap-1.5 overflow-x-auto pb-1 scrollbar-thin">
+            <div className="flex items-center gap-1.5 overflow-x-auto pb-1 scrollbar-thin" role="tablist" aria-label="Platform channels">
               {[
                 { id: "ALL", label: "All Channels" },
                 { id: "FACEBOOK", label: "Facebook" },
@@ -1505,10 +1567,13 @@ export default function UnifiedInboxPage() {
                 { id: "TIKTOK", label: "TikTok" },
               ].map((tab) => {
                 const isActive = platformFilter === tab.id;
+                const isTabLoading = loading && (platformFilter === tab.id || (tab.id === "ALL" && platformFilter === "ALL"));
                 return (
                   <button
                     key={tab.id}
                     type="button"
+                    role="tab"
+                    aria-selected={isActive}
                     onClick={() => switchPlatformFilter(tab.id)}
                     className={`px-2.5 py-1.5 rounded-xl text-xs font-bold transition-all shrink-0 flex items-center gap-1.5 ${
                       isActive
@@ -1516,7 +1581,11 @@ export default function UnifiedInboxPage() {
                         : "bg-white text-slate-700 border border-slate-200/80 hover:bg-slate-50"
                     }`}
                   >
-                    {renderPlatformLogo(tab.id, "w-3.5 h-3.5 shrink-0")}
+                    {isTabLoading ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin text-white shrink-0" />
+                    ) : (
+                      renderPlatformLogo(tab.id, "w-3.5 h-3.5 shrink-0")
+                    )}
                     <span>{tab.label}</span>
                   </button>
                 );
@@ -1539,7 +1608,44 @@ export default function UnifiedInboxPage() {
           {/* Conversation List Items */}
           <div className="flex-1 overflow-y-auto divide-y divide-slate-100">
             {loading ? (
-              <div className="p-6 text-center text-xs text-slate-400">Loading inbox...</div>
+              <div className="p-3 space-y-3 animate-pulse" aria-busy="true" aria-label="Loading conversations">
+                <div className="text-center pb-1 text-[11px] font-medium text-slate-400 flex items-center justify-center gap-1.5">
+                  <Loader2 className="w-3 h-3 animate-spin text-sky-600" />
+                  <span>
+                    {platformFilter !== "ALL"
+                      ? `Loading ${platformFilter.charAt(0) + platformFilter.slice(1).toLowerCase()} conversations...`
+                      : "Loading conversations..."}
+                  </span>
+                </div>
+                {[1, 2, 3, 4, 5].map((i) => (
+                  <div key={i} className="p-3 flex items-start gap-3 border-b border-slate-50">
+                    <div className="w-10 h-10 rounded-full bg-slate-200 shrink-0" />
+                    <div className="flex-1 space-y-2 py-0.5">
+                      <div className="flex justify-between items-center">
+                        <div className="h-3 bg-slate-200 rounded w-1/3" />
+                        <div className="h-2 bg-slate-100 rounded w-1/6" />
+                      </div>
+                      <div className="h-2.5 bg-slate-100 rounded w-3/4" />
+                      <div className="flex gap-1.5 pt-0.5">
+                        <div className="h-2 bg-slate-100 rounded w-10" />
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : convsError ? (
+              <div className="p-8 text-center space-y-3">
+                <AlertCircle className="w-6 h-6 text-rose-500 mx-auto" />
+                <p className="text-xs font-semibold text-slate-700">{convsError}</p>
+                <button
+                  type="button"
+                  onClick={() => fetchConversations(false)}
+                  className="px-3 py-1.5 bg-sky-50 text-sky-700 hover:bg-sky-100 border border-sky-200 rounded-lg text-xs font-bold transition-colors shadow-2xs inline-flex items-center gap-1.5"
+                >
+                  <RefreshCw className="w-3 h-3" />
+                  <span>Try Again</span>
+                </button>
+              </div>
             ) : filteredConversations.length === 0 ? (
               <div className="p-8 text-center text-xs text-slate-400">
                 No conversations found. Inbound messages will appear here.
