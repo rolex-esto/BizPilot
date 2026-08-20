@@ -41,8 +41,8 @@ export default function PrintableGuidePdfPage() {
             </p>
           </div>
           <div className="text-right text-xs text-slate-400 font-mono shrink-0 hidden sm:block">
-            <div>VERSION: 2.0 (2026)</div>
-            <div>STATUS: DEPLOYMENT READY</div>
+            <div>VERSION: 2.0</div>
+            <div>STATUS: PRODUCTION READY</div>
           </div>
         </div>
 
@@ -50,17 +50,17 @@ export default function PrintableGuidePdfPage() {
         <section className="space-y-3">
           <h2 className="text-base font-black text-slate-900 uppercase tracking-wide flex items-center gap-2 border-b border-slate-200 pb-2">
             <span className="w-6 h-6 rounded-lg bg-purple-600 text-white flex items-center justify-center text-xs font-bold">1</span>
-            Phase 1: Day 1 Store Account Setup (5 Minutes)
+            Phase 1: Store Account Setup
           </h2>
           <div className="bg-slate-50 p-4 rounded-2xl border border-slate-200/80 text-xs space-y-2">
             <p className="font-semibold text-slate-800">
-              Navigate to <code className="bg-white px-2 py-0.5 rounded border text-purple-700">/login?mode=signup</code> to provision your store:
+              Create your store account to access your private business dashboard:
             </p>
             <ul className="list-disc list-inside space-y-1 text-slate-600">
               <li><strong>Store Name:</strong> e.g., <em>TechMart Laptops PH</em></li>
               <li><strong>Owner Name:</strong> e.g., <em>Michael Reyes</em></li>
               <li><strong>Email & Password:</strong> Creates your secure, authenticated owner session</li>
-              <li><strong>30-Day Free Trial:</strong> Automatically active with strict tenant database isolation</li>
+              <li><strong>30-Day Free Trial:</strong> Automatically active with strict private data isolation</li>
             </ul>
           </div>
         </section>
@@ -69,11 +69,11 @@ export default function PrintableGuidePdfPage() {
         <section className="space-y-3">
           <h2 className="text-base font-black text-slate-900 uppercase tracking-wide flex items-center gap-2 border-b border-slate-200 pb-2">
             <span className="w-6 h-6 rounded-lg bg-purple-600 text-white flex items-center justify-center text-xs font-bold">2</span>
-            Phase 2: Inventory & Catalog Setup (10 Minutes)
+            Phase 2: Inventory & Catalog Setup
           </h2>
           <div className="bg-slate-50 p-4 rounded-2xl border border-slate-200/80 text-xs space-y-2">
             <p className="text-slate-700 leading-relaxed">
-              Open <strong className="text-slate-900">Inventory Hub (/inventory)</strong> and register your active laptop or product inventory:
+              Open the <strong className="text-slate-900">Inventory Hub</strong> and register your active product catalog:
             </p>
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-1 font-mono text-[11px]">
               <div className="bg-white p-2.5 rounded-xl border border-slate-200">
@@ -103,18 +103,18 @@ export default function PrintableGuidePdfPage() {
         <section className="space-y-3">
           <h2 className="text-base font-black text-slate-900 uppercase tracking-wide flex items-center gap-2 border-b border-slate-200 pb-2">
             <span className="w-6 h-6 rounded-lg bg-purple-600 text-white flex items-center justify-center text-xs font-bold">3</span>
-            Phase 3: Connect Social Channels & Webhooks (3 Minutes)
+            Phase 3: Connect Social Channels
           </h2>
           <div className="bg-slate-50 p-4 rounded-2xl border border-slate-200/80 text-xs text-slate-700 space-y-2">
-            <p>Connect your official communication streams under <strong>Channels Hub (/channels)</strong>:</p>
+            <p>Connect your official communication streams under the <strong>Channels Manager</strong>:</p>
             <div className="flex flex-wrap gap-2 pt-1">
-              <span className="px-3 py-1 bg-blue-100 text-blue-800 rounded-lg font-bold text-[11px]">Facebook Messenger (Meta Graph API)</span>
-              <span className="px-3 py-1 bg-pink-100 text-pink-800 rounded-lg font-bold text-[11px]">Instagram Direct (Professional Account)</span>
-              <span className="px-3 py-1 bg-emerald-100 text-emerald-800 rounded-lg font-bold text-[11px]">WhatsApp Business Cloud API</span>
-              <span className="px-3 py-1 bg-slate-200 text-slate-800 rounded-lg font-bold text-[11px]">TikTok Messaging (Enterprise Review)</span>
+              <span className="px-3 py-1 bg-blue-100 text-blue-800 rounded-lg font-bold text-[11px]">Facebook Messenger</span>
+              <span className="px-3 py-1 bg-pink-100 text-pink-800 rounded-lg font-bold text-[11px]">Instagram Direct</span>
+              <span className="px-3 py-1 bg-emerald-100 text-emerald-800 rounded-lg font-bold text-[11px]">WhatsApp Business</span>
+              <span className="px-3 py-1 bg-slate-200 text-slate-800 rounded-lg font-bold text-[11px]">TikTok Messaging</span>
             </div>
             <p className="text-[11px] text-slate-500 pt-1 leading-relaxed">
-              • Configure Webhook URLs (<code className="text-purple-700 font-mono">/api/webhooks/meta</code>, <code className="text-purple-700 font-mono">/api/webhooks/whatsapp</code>) with Verify Tokens in your Developer Portals. Click <strong>Test Channel</strong> to verify live connection health.
+              • Automatic live message synchronization receives buyer inquiries in real time. Use <strong>Test Channel</strong> to verify your live connection health anytime.
             </p>
           </div>
         </section>
@@ -129,46 +129,46 @@ export default function PrintableGuidePdfPage() {
           <div className="space-y-3 text-xs">
             <div className="p-3.5 bg-slate-50 rounded-2xl border border-slate-200/80 space-y-1">
               <div className="font-bold text-slate-900 flex items-center gap-1.5">
-                <span className="text-purple-600 font-mono">Step 4.1</span> Chat & Negotiate Tawad (/inbox)
+                <span className="text-purple-600 font-mono">Step 4.1</span> Chat & Negotiate in Unified Inbox
               </div>
               <p className="text-slate-600 text-[11px] leading-relaxed">
-                Buyer inquires about laptop. Use the <strong>Quick Negotiation Bar</strong> to enter counter-offer (e.g. ₱18,500 ➔ ₱17,500). System locks in agreed price and calculates discount automatically.
+                Buyer inquires about an item. Use the <strong>Quick Negotiation Bar</strong> to enter counter-offers (e.g. ₱18,500 ➔ ₱17,500). The system locks in the agreed price and computes discounts automatically.
               </p>
             </div>
 
             <div className="p-3.5 bg-slate-50 rounded-2xl border border-slate-200/80 space-y-1">
               <div className="font-bold text-slate-900 flex items-center gap-1.5">
-                <span className="text-purple-600 font-mono">Step 4.2</span> 1-Click Order Creation (/inbox)
+                <span className="text-purple-600 font-mono">Step 4.2</span> 1-Click Conversational Order Creation
               </div>
               <p className="text-slate-600 text-[11px] leading-relaxed">
-                Click <strong>"1-Click Order"</strong> in the chat header. Select fulfillment: <strong>Customer Meetup</strong> (SM Megamall), <strong>LBC Shipping</strong>, or <strong>Grab Courier</strong>.
+                Click <strong>"1-Click Order"</strong> inside the chat header. Select fulfillment: <strong>Customer Meetup</strong> (e.g. SM Megamall), <strong>LBC Shipping</strong>, <strong>Grab Express</strong>, or <strong>Lalamove</strong>.
               </p>
             </div>
 
             <div className="p-3.5 bg-slate-50 rounded-2xl border border-slate-200/80 space-y-1">
               <div className="font-bold text-slate-900 flex items-center gap-1.5">
-                <span className="text-purple-600 font-mono">Step 4.3</span> Operations Calendar Sync (/calendar)
+                <span className="text-purple-600 font-mono">Step 4.3</span> Operations Calendar Sync
               </div>
               <p className="text-slate-600 text-[11px] leading-relaxed">
-                The appointment automatically syncs to your Operations Calendar (3:00 PM Meetup). Avoid double-booking or missed customer handovers.
+                Delivery and meetup appointments automatically sync to your <strong>Operations Calendar</strong>. Avoid double-booking or missed customer handovers.
               </p>
             </div>
 
             <div className="p-3.5 bg-slate-50 rounded-2xl border border-slate-200/80 space-y-1">
               <div className="font-bold text-slate-900 flex items-center gap-1.5">
-                <span className="text-purple-600 font-mono">Step 4.4</span> Payment Verification & Inventory Decrement (/orders)
+                <span className="text-purple-600 font-mono">Step 4.4</span> Payment Verification & Automatic Stock Decrement
               </div>
               <p className="text-slate-600 text-[11px] leading-relaxed">
-                Meet buyer or dispatch rider. Buyer pays cash or GCash. Click <strong>"Verify Payment"</strong> (UNPAID ➔ PAID). Completing order auto-decrements stock (5 ➔ 4).
+                When the buyer pays via cash, GCash, or Maya, click <strong>"Verify Payment"</strong>. Completing the order automatically deducts the product from your inventory count across all channels.
               </p>
             </div>
 
             <div className="p-3.5 bg-slate-50 rounded-2xl border border-slate-200/80 space-y-1">
               <div className="font-bold text-slate-900 flex items-center gap-1.5">
-                <span className="text-purple-600 font-mono">Step 4.5</span> Grounded AI Copilot Q&A (/copilot)
+                <span className="text-purple-600 font-mono">Step 4.5</span> Grounded AI Sales Assistant Q&A
               </div>
               <p className="text-slate-600 text-[11px] leading-relaxed">
-                Ask in plain English or Taglish: <em>"Magkano pa uncollected COD ko today?"</em> or <em>"Anong schedule ko tomorrow?"</em> and receive 100% database-grounded calculations.
+                Ask your Copilot questions like: <em>"How much uncollected COD do I have today?"</em> or <em>"What are my scheduled meetups tomorrow?"</em> and receive exact answers based on your actual store records.
               </p>
             </div>
           </div>
@@ -178,17 +178,17 @@ export default function PrintableGuidePdfPage() {
         <section className="space-y-3">
           <h2 className="text-base font-black text-slate-900 uppercase tracking-wide flex items-center gap-2 border-b border-slate-200 pb-2">
             <span className="w-6 h-6 rounded-lg bg-purple-600 text-white flex items-center justify-center text-xs font-bold">5</span>
-            Phase 5: Store Control Center & Security Management (/settings)
+            Phase 5: Store Control Center & Security
           </h2>
           <div className="bg-slate-50 p-4 rounded-2xl border border-slate-200/80 text-xs text-slate-700 space-y-2">
             <p className="font-semibold text-slate-800">
-              Manage your business profile, delivery methods, payment methods, notifications, and security:
+              Manage your store profile, delivery settings, payment options, and security in the Control Center:
             </p>
             <ul className="list-disc list-inside space-y-1 text-slate-600">
-              <li><strong>Store Profile & Logo:</strong> Set your store name, description, category, and upload your official logo.</li>
-              <li><strong>Fulfillment & Payments:</strong> Configure Customer Meetup, LBC, Grab, Lalamove, GCash, Maya, and COD.</li>
-              <li><strong>Security & Sessions:</strong> Update password, verify email address, and monitor active device logins.</li>
-              <li><strong>Plan & Usage:</strong> Monitor active product count, monthly orders, and 30-day free trial timeline.</li>
+              <li><strong>Store Profile & Branding:</strong> Set store name, category, and upload your official logo.</li>
+              <li><strong>Fulfillment & Payment Methods:</strong> Configure Meetup, LBC, Grab, Lalamove, GCash, Maya, and COD.</li>
+              <li><strong>Security & Password:</strong> Update credentials and manage active device sessions.</li>
+              <li><strong>Plan & Usage:</strong> Monitor catalog capacity, monthly sales volume, and subscription status.</li>
             </ul>
           </div>
         </section>
@@ -219,7 +219,7 @@ export default function PrintableGuidePdfPage() {
               </tr>
               <tr>
                 <td className="p-2.5 font-bold border border-slate-200">Meetup Scheduling</td>
-                <td className="p-2.5 border border-slate-200">Forgot buyer is waiting at SM Megamall</td>
+                <td className="p-2.5 border border-slate-200">Forgot buyer is waiting at meetup point</td>
                 <td className="p-2.5 border border-slate-200 font-semibold text-emerald-900 bg-emerald-50/30">Visual Operations Calendar with Reminders</td>
               </tr>
               <tr>
@@ -247,7 +247,7 @@ export default function PrintableGuidePdfPage() {
             <span className="font-bold text-slate-900">BizPilot MSME Operations Copilot</span> • Confidential Store Owner Guide
           </div>
           <div className="font-semibold text-purple-700">
-            www.bizpilot.ph
+            Official Operations Manual
           </div>
         </div>
       </main>
