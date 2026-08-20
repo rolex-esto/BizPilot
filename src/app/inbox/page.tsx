@@ -197,10 +197,12 @@ export default function UnifiedInboxPage() {
   const initialLoadDoneRef = useRef(false);
   const lastActiveMsgCountRef = useRef<Record<string, number>>({});
 
-  // Concurrency locks: prevent overlapping in-flight requests
+  // Concurrency & Generation Control:
+  // Independent controllers & counters guarantee that conversation list polling,
+  // active conversation details, and background reconciliation never block or corrupt one another.
   const isFetchingConvsRef = useRef(false);
-  const isFetchingActiveConvRef = useRef(false);
   const isAutoReconcilingRef = useRef(false);
+  const activeConvRequestIdRef = useRef(0);
 
   // Stable ref for activeConvId — allows reconciliation effect to read the current
   // conversation ID without taking it as a dependency (which would reset the timer).
@@ -470,13 +472,25 @@ export default function UnifiedInboxPage() {
   /**
    * Fetches the full message thread for the active conversation.
    *
-   * AbortController is used to cancel stale requests when the user switches
-   * conversations rapidly. The response is only applied if the conversation ID
-   * matches the one that was active when the request was started.
+   * Generation tracking + AbortController guarantee that:
+   * 1. Rapid switching A -> B -> C immediately cancels in-flight requests.
+   * 2. Late responses from slow requests are immediately discarded
+   *    and never overwrite the current active conversation.
+   * 3. Response latency telemetry is recorded with high precision.
    */
-  const fetchActiveConversation = async (id: string) => {
-    if (isFetchingActiveConvRef.current) return;
-    isFetchingActiveConvRef.current = true;
+  const fetchActiveConversation = async (
+    id: string,
+    forcedRequestId?: number,
+    startTimeMs?: number
+  ) => {
+    const requestId = forcedRequestId ?? ++activeConvRequestIdRef.current;
+    const start = startTimeMs ?? performance.now();
+
+    // Abort previous in-flight active request
+    if (activeFetchAbortRef.current) {
+      activeFetchAbortRef.current.abort();
+      activeFetchAbortRef.current = null;
+    }
 
     const abortController = new AbortController();
     activeFetchAbortRef.current = abortController;
@@ -490,19 +504,25 @@ export default function UnifiedInboxPage() {
       if (data.status === "success") {
         const conv = data.conversation as Conversation;
 
-        // Guard: discard response if conversation changed while request was in flight
-        if (activeConvIdRef.current !== id) return;
+        // Strict Generation Guard:
+        // Discard response if another switch occurred or active conversation changed
+        if (requestId !== activeConvRequestIdRef.current || activeConvIdRef.current !== id) {
+          console.log(`[INBOX][SWITCH] Stale response discarded for conv=${id} (gen=${requestId}, currentGen=${activeConvRequestIdRef.current})`);
+          return;
+        }
+
+        const elapsed = Math.round(performance.now() - start);
+        console.log(`[INBOX][PERF] Conversation ${id} loaded in ${elapsed}ms (msgs=${conv.messages?.length || 0})`);
 
         setActiveConv(conv);
-        setOrderAddress(conv.customer.deliveryAddress || "");
-        setOrderPhone(conv.customer.phone || "");
+        setOrderAddress(conv.customer?.deliveryAddress || "");
+        setOrderPhone(conv.customer?.phone || "");
 
         const messages = conv.messages || [];
         const msgCount = messages.length;
         const prevCount = lastActiveMsgCountRef.current[id];
         if (prevCount !== undefined && msgCount > prevCount) {
           const lastMsg = messages[messages.length - 1];
-          // Only chime for new INBOUND messages in the active thread
           if (lastMsg && lastMsg.direction === "INBOUND") {
             playNotificationChime();
           }
@@ -516,8 +536,43 @@ export default function UnifiedInboxPage() {
       if (activeFetchAbortRef.current === abortController) {
         activeFetchAbortRef.current = null;
       }
-      isFetchingActiveConvRef.current = false;
     }
+  };
+
+  /**
+   * Fast & Responsive Customer Selection Handler:
+   * 1. Cancels previous in-flight requests immediately.
+   * 2. Immediately updates active conversation ID and optimistic state (0ms UI lag).
+   * 3. Launches dedicated thread fetch with monotonic generation counter.
+   */
+  const handleSelectConversation = (conv: Conversation) => {
+    if (!conv?.id) return;
+    if (activeConvId === conv.id) return;
+
+    const start = performance.now();
+    const nextGen = ++activeConvRequestIdRef.current;
+
+    // 1. Immediately abort previous active request
+    if (activeFetchAbortRef.current) {
+      activeFetchAbortRef.current.abort();
+      activeFetchAbortRef.current = null;
+    }
+
+    // 2. Immediately update state references
+    activeConvIdRef.current = conv.id;
+    setActiveConvId(conv.id);
+
+    // 3. Optimistic Immediate Update:
+    // Update customer profile & basic thread info instantly without waiting for network
+    setActiveConv({
+      ...conv,
+      messages: conv.messages || [],
+    });
+    setReplyText("");
+    setStagedMedia(null);
+
+    // 4. Immediately launch fresh fetch with high-resolution generation tracking
+    fetchActiveConversation(conv.id, nextGen, start);
   };
 
   const handleApproveSuggestion = async (suggestionText: string) => {
@@ -676,27 +731,19 @@ export default function UnifiedInboxPage() {
   useEffect(() => {
     if (!activeConvId) return;
 
-    // Cancel any stale request for the previous conversation
-    if (activeFetchAbortRef.current) {
-      activeFetchAbortRef.current.abort();
-      activeFetchAbortRef.current = null;
-    }
-    isFetchingActiveConvRef.current = false;
-
-    fetchActiveConversation(activeConvId);
-
-    // Reset document title once conversation is active
     if (typeof document !== "undefined") {
       document.title = "BizPilot - Customer Messages";
     }
 
-    const capturedConvId = activeConvId; // capture for closure safety
+    const capturedConvId = activeConvId;
+    const capturedGen = activeConvRequestIdRef.current;
 
+    // Background interval polls the active thread every 2 seconds
     const chatInterval = setInterval(() => {
       // Ignore if tab is hidden or the conversation changed
       if (typeof document !== "undefined" && document.hidden) return;
       if (activeConvIdRef.current !== capturedConvId) return;
-      fetchActiveConversation(capturedConvId);
+      fetchActiveConversation(capturedConvId, capturedGen);
     }, 2000);
 
     return () => clearInterval(chatInterval);
@@ -1213,7 +1260,7 @@ export default function UnifiedInboxPage() {
                 return (
                   <button
                     key={conv.id}
-                    onClick={() => setActiveConvId(conv.id)}
+                    onClick={() => handleSelectConversation(conv)}
                     className={`w-full text-left p-3 transition-colors flex items-start gap-3 ${
                       isSelected ? "bg-sky-50/80 border-l-4 border-sky-600" : "hover:bg-slate-50"
                     }`}
@@ -1286,7 +1333,15 @@ export default function UnifiedInboxPage() {
               <div className="p-3.5 border-b border-slate-100 flex items-center justify-between bg-slate-50">
                 <div className="flex items-center gap-2">
                   <button
-                    onClick={() => setActiveConvId(null)}
+                    onClick={() => {
+                      if (activeFetchAbortRef.current) {
+                        activeFetchAbortRef.current.abort();
+                        activeFetchAbortRef.current = null;
+                      }
+                      activeConvIdRef.current = null;
+                      setActiveConvId(null);
+                      setActiveConv(null);
+                    }}
                     className="lg:hidden p-1.5 -ml-1 rounded-lg hover:bg-slate-200 text-slate-600"
                     title="Back to inbox"
                   >
@@ -2151,7 +2206,14 @@ export default function UnifiedInboxPage() {
             </button>
             <button
               onClick={() => {
-                setActiveConvId(activeToast.convId);
+                const targetConv = conversations.find((c) => c.id === activeToast.convId);
+                if (targetConv) {
+                  handleSelectConversation(targetConv);
+                } else {
+                  activeConvIdRef.current = activeToast.convId;
+                  setActiveConvId(activeToast.convId);
+                  fetchActiveConversation(activeToast.convId);
+                }
                 setActiveToast(null);
                 if (typeof document !== "undefined") {
                   document.title = "BizPilot - Customer Messages";

@@ -823,7 +823,7 @@ async function runTests() {
       });
 
       assert(
-        (convAfter?.unreadCount ?? 0) >= 1 && convAfter?.lastMessagePreview?.includes("video"),
+        (convAfter?.unreadCount ?? 0) >= 1 && Boolean(convAfter?.lastMessagePreview?.includes("video")),
         "NOTIF-1",
         "Inbound Media Message Atomically Increments Unread Count and Sets Video Preview",
         `Unread count: ${convAfter?.unreadCount}, Preview: "${convAfter?.lastMessagePreview}"`
