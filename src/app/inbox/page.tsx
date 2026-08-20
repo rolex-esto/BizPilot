@@ -1580,15 +1580,22 @@ export default function UnifiedInboxPage() {
                             const mediaType = msg.mediaType;
 
                             if (mediaType === "IMAGE" || /\.(jpg|jpeg|png|webp|gif)($|\?)/i.test(mediaUrl) || mediaUrl.startsWith("data:image/") || mediaUrl.startsWith("blob:")) {
+                              const proxyUrl = `/api/media/proxy?messageId=${msg.id}`;
                               return (
                                 <div className="mb-2 relative group overflow-hidden rounded-xl border border-slate-200/60 bg-black/5">
                                   <img
                                     src={mediaUrl}
                                     alt="Attachment"
+                                    referrerPolicy="no-referrer"
                                     onClick={() => setLightboxMedia({ url: mediaUrl, title: isCustomer ? activeConv.customer.name : "Store Owner", type: "IMAGE" })}
                                     className="max-h-60 w-full object-cover rounded-xl cursor-zoom-in transition-transform duration-200 group-hover:scale-102"
                                     onError={(e) => {
-                                      (e.target as HTMLElement).style.display = "none";
+                                      const target = e.currentTarget;
+                                      if (target.src !== window.location.origin + proxyUrl && !target.src.includes("/api/media/proxy")) {
+                                        target.src = proxyUrl;
+                                      } else {
+                                        target.style.display = "none";
+                                      }
                                     }}
                                   />
                                   <button

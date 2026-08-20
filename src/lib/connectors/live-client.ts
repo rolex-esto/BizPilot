@@ -873,6 +873,9 @@ export class LivePlatformApiClient {
       senderId: string;
       senderName: string;
       text: string;
+      mediaUrl?: string;
+      mediaType?: "IMAGE" | "VIDEO" | "AUDIO" | "DOCUMENT";
+      messageType?: "TEXT" | "IMAGE" | "VIDEO" | "AUDIO" | "DOCUMENT";
       timestamp: Date;
       direction: "INBOUND" | "OUTBOUND";
     }>;
@@ -901,19 +904,21 @@ export class LivePlatformApiClient {
         senderId: string;
         senderName: string;
         text: string;
+        mediaUrl?: string;
+        mediaType?: "IMAGE" | "VIDEO" | "AUDIO" | "DOCUMENT";
+        messageType?: "TEXT" | "IMAGE" | "VIDEO" | "AUDIO" | "DOCUMENT";
         timestamp: Date;
         direction: "INBOUND" | "OUTBOUND";
       }> = [];
 
-      // Build initial URL
+      // Build initial URL requesting attachments
       const buildInitialUrl = (): string => {
         const params = new URLSearchParams({
-          fields: "id,updated_time,messages{id,created_time,from,to,message}",
+          fields: "id,updated_time,messages{id,created_time,from,to,message,attachments{image_data,file_url,mime_type,name,video_data}}",
           limit: String(perPage),
           access_token: rawPageToken,
         });
         if (sinceEpochSec !== null) {
-          // Meta /conversations supports `since` as a Unix epoch timestamp
           params.set("since", String(sinceEpochSec));
         }
         return `${this.config.metaBaseUrl}/${this.config.graphApiVersion}/${encodeURIComponent(pageId)}/conversations?${params.toString()}`;
@@ -942,7 +947,7 @@ export class LivePlatformApiClient {
 
         if (!response.ok) {
           return {
-            success: pagesFetched > 1, // partial success if some pages collected
+            success: pagesFetched > 1,
             messages: results,
             error: data.error?.message || `HTTP ${response.status}`,
             pagesFetched,
@@ -954,23 +959,62 @@ export class LivePlatformApiClient {
         for (const conv of convs) {
           const msgList: any[] = conv.messages?.data || [];
           for (const msg of msgList) {
-            if (!msg.message) continue;
-
             const senderId: string = msg.from?.id || "";
             const senderName: string = msg.from?.name || "Customer";
             const isFromPage = senderId === pageId;
 
-            // OUTBOUND echo safety: skip page→customer messages entirely.
-            // These are already persisted by /api/messages/send, and reconciling them
-            // would attempt to create a Customer named "Store Owner" if no conversation
-            // exists yet — which violates the no-fabricated-identity invariant.
+            // Skip page->customer echoes
             if (isFromPage) continue;
+
+            let text = msg.message || "";
+            let mediaUrl: string | undefined;
+            let mediaType: "IMAGE" | "VIDEO" | "AUDIO" | "DOCUMENT" | undefined;
+            let messageType: "TEXT" | "IMAGE" | "VIDEO" | "AUDIO" | "DOCUMENT" = "TEXT";
+
+            if (msg.attachments?.data && msg.attachments.data.length > 0) {
+              const att = msg.attachments.data[0];
+              if (att.image_data?.url) {
+                mediaUrl = att.image_data.url;
+                mediaType = "IMAGE";
+                messageType = "IMAGE";
+                if (!text) text = "📷 Sent a photo";
+              } else if (att.video_data?.url) {
+                mediaUrl = att.video_data.url;
+                mediaType = "VIDEO";
+                messageType = "VIDEO";
+                if (!text) text = "🎥 Sent a video";
+              } else if (att.file_url) {
+                mediaUrl = att.file_url;
+                if (att.mime_type?.startsWith("image/")) {
+                  mediaType = "IMAGE";
+                  messageType = "IMAGE";
+                  if (!text) text = "📷 Sent a photo";
+                } else if (att.mime_type?.startsWith("video/")) {
+                  mediaType = "VIDEO";
+                  messageType = "VIDEO";
+                  if (!text) text = "🎥 Sent a video";
+                } else if (att.mime_type?.startsWith("audio/")) {
+                  mediaType = "AUDIO";
+                  messageType = "AUDIO";
+                  if (!text) text = "🎵 Sent a voice message";
+                } else {
+                  mediaType = "DOCUMENT";
+                  messageType = "DOCUMENT";
+                  if (!text) text = `📎 Sent a file: ${att.name || "attachment"}`;
+                }
+              }
+            }
+
+            if (!text && !mediaUrl) continue;
 
             results.push({
               messageId: msg.id,
               senderId,
               senderName,
-              text: msg.message,
+              text,
+              mediaUrl,
+              mediaType,
+              messageType,
               timestamp: new Date(msg.created_time || conv.updated_time),
               direction: "INBOUND",
             });
