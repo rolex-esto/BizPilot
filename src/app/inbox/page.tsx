@@ -230,6 +230,8 @@ export default function UnifiedInboxPage() {
   const [syncState, setSyncState] = useState<"idle" | "syncing" | "success" | "error">("idle");
   const [convsError, setConvsError] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
+  const prevActiveConvIdRef = useRef<string | null>(null);
   const [activeToast, setActiveToast] = useState<{
     id: string;
     name: string;
@@ -868,6 +870,14 @@ export default function UnifiedInboxPage() {
     });
     setReplyText("");
     cleanupPendingAttachment();
+
+    // Instant redirect to latest message at the bottom
+    requestAnimationFrame(() => {
+      if (messagesContainerRef.current) {
+        messagesContainerRef.current.scrollTop = messagesContainerRef.current.scrollHeight;
+      }
+      messagesEndRef.current?.scrollIntoView({ behavior: "auto" });
+    });
 
     // 4. Launch full fresh thread & order details fetch asynchronously
     fetchActiveConversation(conv.id, false, nextGen);
@@ -1532,10 +1542,23 @@ export default function UnifiedInboxPage() {
     return () => clearInterval(channelSyncInterval);
   }, [inboxMode]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Auto-scroll to bottom of messages
+  // Auto-redirect / scroll to the latest message on active thread switch or new message arrival
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [activeConv?.messages?.length, activeConvId, aiSuggestionMinimized]);
+    if (!activeConvId) return;
+    const isNewConv = prevActiveConvIdRef.current !== activeConvId;
+    prevActiveConvIdRef.current = activeConvId;
+
+    if (isNewConv) {
+      // Instant snap to bottom on conversation switch
+      if (messagesContainerRef.current) {
+        messagesContainerRef.current.scrollTop = messagesContainerRef.current.scrollHeight;
+      }
+      messagesEndRef.current?.scrollIntoView({ behavior: "auto" });
+    } else {
+      // Smooth scroll on new message arrival within active conversation
+      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [activeConvId, activeConv?.messages?.length, aiSuggestionMinimized]);
 
   // Filtered Conversations Search with Strict Channel Invariant
   const filteredConversations = useMemo(() => {
@@ -1985,7 +2008,7 @@ export default function UnifiedInboxPage() {
               </div>
 
               {/* Message Thread History */}
-              <div className="flex-1 overflow-y-auto p-3.5 space-y-3 bg-slate-50/50">
+              <div ref={messagesContainerRef} className="flex-1 overflow-y-auto p-3.5 space-y-3 bg-slate-50/50">
                 {/* Load Older Messages Action */}
                 {hasMoreOlder && (
                   <div className="text-center pb-2">
