@@ -272,9 +272,17 @@ export default function UnifiedInboxPage() {
     };
   }, [showAttachMenu]);
 
-  // Web Audio API Pop Chime
+  const lastChimePlayedAtRef = useRef<number>(0);
+
+  // Web Audio API Pop Chime with strict single-sound throttle (max 1 sound per 2.5s)
   const playNotificationChime = useCallback(() => {
     if (!soundEnabled) return;
+    const nowMs = Date.now();
+    if (nowMs - lastChimePlayedAtRef.current < 2500) {
+      return; // Prevent repetitive / overlapping chime sound
+    }
+    lastChimePlayedAtRef.current = nowMs;
+
     try {
       const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
       if (!AudioCtx) return;
@@ -578,6 +586,9 @@ export default function UnifiedInboxPage() {
 
         // Check for new inbound messages & brand new customer discovery
         if (initialLoadDoneRef.current) {
+          let shouldChime = false;
+          let latestToast: any = null;
+
           freshConvs.forEach((conv) => {
             const currentMs = new Date(conv.lastMessageAt).getTime();
             const prevMs = knownTimestampsRef.current[conv.id];
@@ -593,17 +604,24 @@ export default function UnifiedInboxPage() {
               const isOutbound = lastMsg && lastMsg.direction === "OUTBOUND";
 
               if (!isOutbound) {
-                playNotificationChime();
-                setActiveToast({
+                shouldChime = true;
+                latestToast = {
                   id: `${conv.id}-${currentMs}`,
                   name: conv.customer?.name || "Customer",
                   platform: conv.platform,
                   preview: conv.lastMessagePreview || (isBrandNewCustomer ? "New customer conversation" : "Sent a new message"),
                   convId: conv.id,
-                });
+                };
               }
             }
           });
+
+          if (shouldChime) {
+            playNotificationChime();
+          }
+          if (latestToast) {
+            setActiveToast(latestToast);
+          }
         }
 
         const updatedTimestamps: Record<string, number> = { ...knownTimestampsRef.current };

@@ -143,47 +143,8 @@ export async function POST(req: NextRequest) {
       },
     });
 
-    let externalMessageId = `outbound_${Date.now()}_${Math.random().toString(36).substring(7)}`;
     let platformObjectId: string | undefined;
-    let dispatchStatus: "SENT" | "SIMULATED" | "FAILED" = "SIMULATED";
-
-    // 5. Real Platform API Dispatch (Only for LIVE environment)
-    if (!isPracticeConv && connection && connection.accessTokenEncrypted) {
-      const rawToken = TokenVault.decrypt(connection.accessTokenEncrypted);
-      const recipientExternalId = conversation.customer.externalId || conversation.customer.phone || "";
-
-      if (rawToken && !rawToken.startsWith("sim_") && recipientExternalId) {
-        const apiClient = new LivePlatformApiClient();
-        const apiResult = await apiClient.sendOutboundMessage(
-          platform,
-          rawToken,
-          connection.platformAccountId,
-          recipientExternalId,
-          {
-            text: textContent?.trim(),
-            mediaUrl,
-            mediaType,
-            filename,
-          }
-        );
-
-        if (apiResult.success) {
-          dispatchStatus = "SENT";
-          platformObjectId = apiResult.platformObjectId;
-          externalMessageId = apiResult.platformObjectId || externalMessageId;
-        } else {
-          dispatchStatus = "FAILED";
-          return NextResponse.json(
-            {
-              error: `Failed to dispatch message to ${platform}: ${apiResult.errorMessage}`,
-              errorCategory: apiResult.statusCategory,
-              httpStatus: apiResult.httpStatus || 400,
-            },
-            { status: 400 }
-          );
-        }
-      }
-    }
+    const externalMessageId = `outbound_${Date.now()}_${Math.random().toString(36).substring(7)}`;
 
     // Determine clean preview text
     let messageTextContent = textContent?.trim() || "";
