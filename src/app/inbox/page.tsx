@@ -240,6 +240,7 @@ export default function UnifiedInboxPage() {
   const isFetchingActiveThreadRef = useRef(false);
   const isFetchingConvsRef = useRef(false);
   const isAutoReconcilingRef = useRef(false);
+  const isSendingMessageRef = useRef(false);
   const activeConvRequestIdRef = useRef(0);
 
   const activeConvIdRef = useRef<string | null>(null);
@@ -986,7 +987,9 @@ export default function UnifiedInboxPage() {
     const hasAttachment = Boolean(pendingAttachment);
 
     if ((!hasText && !hasAttachment) || !activeConvId) return;
+    if (isSendingMessageRef.current) return;
 
+    isSendingMessageRef.current = true;
     const sendingConvId = activeConvId;
     const outboundText = replyText.trim();
     const tempMessageId = `temp_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
@@ -1117,6 +1120,7 @@ export default function UnifiedInboxPage() {
         return { ...prev, messages: updatedMessages };
       });
     } finally {
+      isSendingMessageRef.current = false;
       setSending(false);
     }
   };

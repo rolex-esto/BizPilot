@@ -170,6 +170,63 @@ export class MessageHub {
       });
     }
 
+    // 4b. Outbound Echo Reconciliation Guard:
+    // If an outbound message originated from BizPilot, it was already persisted with an 'outbound_*' ID.
+    // Reconcile the provider webhook echo to the existing record instead of creating a duplicate message.
+    if (event.direction === "OUTBOUND") {
+      const pendingOutbound = await prisma.message.findFirst({
+        where: {
+          conversationId: conversation.id,
+          direction: "OUTBOUND",
+          sentAt: { gt: new Date(Date.now() - 120000) }, // Sent within last 2 minutes
+          OR: [
+            { externalMessageId: event.externalMessageId },
+            {
+              AND: [
+                { externalMessageId: { startsWith: "outbound_" } },
+                {
+                  OR: [
+                    { textContent: event.textContent },
+                    ...(event.mediaType ? [{ mediaType: event.mediaType }] : []),
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+        orderBy: { sentAt: "desc" },
+      });
+
+      if (pendingOutbound) {
+        // Upgrade externalMessageId to provider's official platform message ID
+        if (event.externalMessageId && pendingOutbound.externalMessageId !== event.externalMessageId) {
+          try {
+            await prisma.message.update({
+              where: { id: pendingOutbound.id },
+              data: {
+                externalMessageId: event.externalMessageId,
+                rawPayload: JSON.stringify({
+                  ...(pendingOutbound.rawPayload ? JSON.parse(pendingOutbound.rawPayload) : {}),
+                  providerEchoReconciled: true,
+                  platformObjectId: event.externalMessageId,
+                }),
+              },
+            });
+          } catch {
+            // Safe handling if already updated concurrently
+          }
+        }
+
+        return {
+          isDuplicate: true,
+          messageId: pendingOutbound.id,
+          conversationId: conversation.id,
+          customerId: customer.id,
+          platformConnectionId,
+        };
+      }
+    }
+
     // Track whether to update conversation metadata after message creation
     const shouldUpdateConversation = true;
 
