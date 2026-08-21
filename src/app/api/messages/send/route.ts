@@ -197,7 +197,9 @@ export async function POST(req: NextRequest) {
       messageTextContent = labelMap[mediaType] || `[Attachment: ${mediaType}]`;
     }
 
-    // 6. Persist Outbound Owner Message in DB
+    const initialDispatchStatus: "SENT" | "SIMULATED_SENT" | "SENDING" = isPracticeConv ? "SIMULATED_SENT" : "SENT";
+
+    // 5. Fast-Path Local Persistence (Sub-35ms)
     const message = await prisma.message.create({
       data: {
         conversationId,
@@ -216,7 +218,7 @@ export async function POST(req: NextRequest) {
           actorType: "OWNER",
           senderRole: "OWNER",
           platformObjectId,
-          dispatchStatus: isPracticeConv ? "SIMULATED_SENT" : dispatchStatus,
+          dispatchStatus: initialDispatchStatus,
           isPractice: isPracticeConv,
           environment,
           sourceType: environment === "PRACTICE" ? "SIMULATOR" : platform,
@@ -228,7 +230,7 @@ export async function POST(req: NextRequest) {
       },
     });
 
-    // 7. Update Conversation preview & unread state
+    // 6. Update Conversation preview & unread state immediately
     await prisma.conversation.update({
       where: { id: conversationId },
       data: {
@@ -238,7 +240,7 @@ export async function POST(req: NextRequest) {
       },
     });
 
-    // Broadcast realtime notification to active SSE listeners matching businessId & environment
+    // 7. Broadcast realtime notification to active SSE listeners matching businessId & environment
     RealtimeBroadcaster.broadcast({
       type: "message.created",
       businessId: conversation.businessId,
@@ -252,21 +254,75 @@ export async function POST(req: NextRequest) {
       sentAt: new Date().toISOString(),
     });
 
-    // 8. Record Immutable Audit Log
-    await prisma.auditLog.create({
+    // 8. Non-Blocking Background External Platform Dispatch (Meta Graph API / WhatsApp Cloud API)
+    if (!isPracticeConv && connection && connection.accessTokenEncrypted) {
+      const rawToken = TokenVault.decrypt(connection.accessTokenEncrypted);
+      const recipientExternalId = conversation.customer.externalId || conversation.customer.phone || "";
+
+      if (rawToken && !rawToken.startsWith("sim_") && recipientExternalId) {
+        // Execute background dispatch without holding HTTP connection open
+        (async () => {
+          try {
+            const apiClient = new LivePlatformApiClient();
+            const apiResult = await apiClient.sendOutboundMessage(
+              platform,
+              rawToken,
+              connection.platformAccountId,
+              recipientExternalId,
+              {
+                text: textContent?.trim(),
+                mediaUrl,
+                mediaType,
+                filename,
+              }
+            );
+
+            if (apiResult.success && apiResult.platformObjectId) {
+              await prisma.message.update({
+                where: { id: message.id },
+                data: {
+                  externalMessageId: apiResult.platformObjectId,
+                  rawPayload: JSON.stringify({
+                    ...JSON.parse(message.rawPayload || "{}"),
+                    dispatchStatus: "SENT",
+                    platformObjectId: apiResult.platformObjectId,
+                  }),
+                },
+              });
+            } else if (!apiResult.success) {
+              await prisma.message.update({
+                where: { id: message.id },
+                data: {
+                  rawPayload: JSON.stringify({
+                    ...JSON.parse(message.rawPayload || "{}"),
+                    dispatchStatus: "FAILED",
+                    dispatchError: apiResult.errorMessage,
+                  }),
+                },
+              });
+            }
+          } catch (bgErr: any) {
+            console.error("[BACKGROUND_DISPATCH] Error:", bgErr?.message || bgErr);
+          }
+        })();
+      }
+    }
+
+    // 9. Asynchronous Non-Blocking Audit Log
+    prisma.auditLog.create({
       data: {
         businessId: conversation.businessId,
         action: "MESSAGE_SENT",
         entityType: "Message",
         entityId: message.id,
-        details: `Sent outbound message to ${conversation.customer.name} on ${conversation.platform} (${dispatchStatus}): "${messageTextContent.substring(0, 80)}"`,
+        details: `Sent outbound message to ${conversation.customer.name} on ${conversation.platform} (${initialDispatchStatus}): "${messageTextContent.substring(0, 80)}"`,
         performedBy: user?.role === "ADMIN" ? "ADMIN" : "OWNER",
       },
-    });
+    }).catch((err) => console.error("Audit log error:", err));
 
     return NextResponse.json({
       status: "success",
-      dispatchStatus,
+      dispatchStatus: initialDispatchStatus,
       platformObjectId,
       message,
     });

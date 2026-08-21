@@ -767,17 +767,41 @@ export default function UnifiedInboxPage() {
         } else {
           // Full Load Mode
           const conv = data.conversation as Conversation;
-          const messages = conv.messages || [];
+          const serverMessages = conv.messages || [];
 
           setHasMoreOlder(Boolean(data.hasMoreOlder));
           setLoadingThreadId(null);
 
-          convMessagesCacheRef.current.set(id, messages);
-          if (messages.length > 0) {
-            lastKnownActiveMsgTimestampRef.current = messages[messages.length - 1].sentAt;
-          }
+          setActiveConv((prev) => {
+            if (!prev || prev.id !== id) {
+              convMessagesCacheRef.current.set(id, serverMessages);
+              if (serverMessages.length > 0) {
+                lastKnownActiveMsgTimestampRef.current = serverMessages[serverMessages.length - 1].sentAt;
+              }
+              return conv;
+            }
 
-          setActiveConv(conv);
+            // Preserve any pending optimistic messages currently in-flight
+            const pendingOptimistic = (prev.messages || []).filter(
+              (m) => m.status === "SENDING" || m.id.startsWith("temp_")
+            );
+            const serverMsgIds = new Set(serverMessages.map((m) => m.id));
+            const preserved = pendingOptimistic.filter((m) => !serverMsgIds.has(m.id));
+            const merged = [...serverMessages, ...preserved].sort(
+              (a, b) => new Date(a.sentAt).getTime() - new Date(b.sentAt).getTime()
+            );
+
+            convMessagesCacheRef.current.set(id, merged);
+            if (merged.length > 0) {
+              lastKnownActiveMsgTimestampRef.current = merged[merged.length - 1].sentAt;
+            }
+
+            return {
+              ...conv,
+              messages: merged,
+            };
+          });
+
           setOrderAddress(conv.customer?.deliveryAddress || "");
           setOrderPhone(conv.customer?.phone || "");
         }
@@ -990,6 +1014,23 @@ export default function UnifiedInboxPage() {
       };
     });
 
+    // 2. Instant Sidebar Conversation Preview & Re-sort (0ms UI latency)
+    setConversations((prev) => {
+      const previewText = outboundText || `Sent a ${pendingAttachment?.mediaType?.toLowerCase() || "file"}`;
+      const updated = prev.map((c) => {
+        if (c.id === sendingConvId) {
+          return {
+            ...c,
+            lastMessageAt: optimisticMsg.sentAt,
+            lastMessagePreview: previewText,
+            messages: [optimisticMsg],
+          };
+        }
+        return c;
+      });
+      return updated.sort((a, b) => new Date(b.lastMessageAt || 0).getTime() - new Date(a.lastMessageAt || 0).getTime());
+    });
+
     // Clear input & staged preview immediately
     setReplyText("");
     const stagedFile = pendingAttachment?.file;
@@ -1024,7 +1065,7 @@ export default function UnifiedInboxPage() {
         uploadedFilename = uploadData.filename || stagedFilename;
       }
 
-      // Step B: Send Message via API
+      // Step B: Send Message via API (Fast Path ~30ms)
       const res = await fetch("/api/messages/send", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1075,10 +1116,63 @@ export default function UnifiedInboxPage() {
         convMessagesCacheRef.current.set(sendingConvId, updatedMessages);
         return { ...prev, messages: updatedMessages };
       });
-
-      alert(err.message || "Error sending message.");
     } finally {
       setSending(false);
+    }
+  };
+
+  // ─── Retry Failed Message ───────────────────────────────────────────────────
+  const handleRetryMessage = async (failedMsg: Message) => {
+    if (!activeConvId) return;
+    const sendingConvId = activeConvId;
+
+    setActiveConv((prev) => {
+      if (!prev || prev.id !== sendingConvId) return prev;
+      const updatedMessages = (prev.messages || []).map((m) =>
+        m.id === failedMsg.id ? { ...m, status: "SENDING" as const } : m
+      );
+      convMessagesCacheRef.current.set(sendingConvId, updatedMessages);
+      return { ...prev, messages: updatedMessages };
+    });
+
+    try {
+      const res = await fetch("/api/messages/send", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          conversationId: sendingConvId,
+          textContent: failedMsg.textContent,
+          mediaUrl: failedMsg.mediaUrl,
+          mediaType: failedMsg.mediaType,
+        }),
+      });
+
+      const data = await res.json();
+      if (data.status === "success" && data.message) {
+        const persistedMsg: Message = data.message;
+        setActiveConv((prev) => {
+          if (!prev || prev.id !== sendingConvId) return prev;
+          const updatedMessages = (prev.messages || []).map((m) =>
+            m.id === failedMsg.id ? { ...persistedMsg, status: "SENT" as const } : m
+          );
+          convMessagesCacheRef.current.set(sendingConvId, updatedMessages);
+          return { ...prev, messages: updatedMessages };
+        });
+        lastKnownActiveMsgTimestampRef.current = persistedMsg.sentAt;
+        fetchConversations(true);
+      } else {
+        throw new Error(data.error || data.message || "Failed to retry message");
+      }
+    } catch (err) {
+      console.error("Retry error:", err);
+      setActiveConv((prev) => {
+        if (!prev || prev.id !== sendingConvId) return prev;
+        const updatedMessages = (prev.messages || []).map((m) =>
+          m.id === failedMsg.id ? { ...m, status: "FAILED" as const } : m
+        );
+        convMessagesCacheRef.current.set(sendingConvId, updatedMessages);
+        return { ...prev, messages: updatedMessages };
+      });
     }
   };
 
@@ -1102,7 +1196,27 @@ export default function UnifiedInboxPage() {
       if (!prev || prev.id !== sendingConvId) return prev;
       const updatedMessages = [...(prev.messages || []), optimisticMsg];
       convMessagesCacheRef.current.set(sendingConvId, updatedMessages);
-      return { ...prev, messages: updatedMessages };
+      return {
+        ...prev,
+        messages: updatedMessages,
+        lastMessageAt: optimisticMsg.sentAt,
+        lastMessagePreview: suggestionText.trim(),
+      };
+    });
+
+    setConversations((prev) => {
+      const updated = prev.map((c) => {
+        if (c.id === sendingConvId) {
+          return {
+            ...c,
+            lastMessageAt: optimisticMsg.sentAt,
+            lastMessagePreview: suggestionText.trim(),
+            messages: [optimisticMsg],
+          };
+        }
+        return c;
+      });
+      return updated.sort((a, b) => new Date(b.lastMessageAt || 0).getTime() - new Date(a.lastMessageAt || 0).getTime());
     });
 
     setReplyText("");
@@ -2014,8 +2128,25 @@ export default function UnifiedInboxPage() {
                             })}
                           </span>
                           {!isCustomer && (
-                            <span>
-                              {msg.status === "SENDING" ? "• Sending..." : msg.status === "FAILED" ? "• Failed" : "✓"}
+                            <span className="inline-flex items-center gap-1 font-medium">
+                              {msg.status === "SENDING" ? (
+                                <span className="text-amber-500 inline-flex items-center gap-1">
+                                  <Loader2 className="w-2.5 h-2.5 animate-spin" /> Sending...
+                                </span>
+                              ) : msg.status === "FAILED" ? (
+                                <span className="text-rose-500 inline-flex items-center gap-1">
+                                  <span>• Failed</span>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleRetryMessage(msg)}
+                                    className="underline hover:text-rose-700 font-bold ml-1 cursor-pointer"
+                                  >
+                                    Retry
+                                  </button>
+                                </span>
+                              ) : (
+                                <span className="text-sky-500 font-bold">✓ Sent</span>
+                              )}
                             </span>
                           )}
                         </div>

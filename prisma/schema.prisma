@@ -144,6 +144,8 @@ model Conversation {
 
   @@index([businessId, environment])
   @@index([businessId, environment, platform])
+  @@index([businessId, environment, lastMessageAt])
+  @@index([businessId, lastMessageAt])
   @@index([businessId, platform])
   @@index([businessId, status])
   @@index([customerId])
@@ -174,6 +176,7 @@ model Message {
 
   @@index([conversationId, environment])
   @@index([conversationId, sentAt])
+  @@index([conversationId, sentAt, id])
   @@index([platform, externalMessageId])
 }
 
