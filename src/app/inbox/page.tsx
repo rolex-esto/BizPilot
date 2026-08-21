@@ -216,8 +216,17 @@ export default function UnifiedInboxPage() {
   const [handlingToggleLoading, setHandlingToggleLoading] = useState(false);
   const [aiSuggestionMinimized, setAiSuggestionMinimized] = useState(false);
 
-  // Real-time Sound & Pop-up Notification State
-  const [soundEnabled, setSoundEnabled] = useState(true);
+  // Real-time Sound & Pop-up Notification State (Persisted in localStorage with ref sync)
+  const [soundEnabled, setSoundEnabled] = useState<boolean>(() => {
+    if (typeof window !== "undefined") {
+      const saved = localStorage.getItem("bizpilot_inbox_sound_enabled");
+      return saved !== null ? saved === "true" : true;
+    }
+    return true;
+  });
+  const soundEnabledRef = useRef<boolean>(soundEnabled);
+  soundEnabledRef.current = soundEnabled;
+
   const [syncState, setSyncState] = useState<"idle" | "syncing" | "success" | "error">("idle");
   const [convsError, setConvsError] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -274,12 +283,17 @@ export default function UnifiedInboxPage() {
 
   const lastChimePlayedAtRef = useRef<number>(0);
 
-  // Web Audio API Pop Chime with strict single-sound throttle (max 1 sound per 2.5s)
-  const playNotificationChime = useCallback(() => {
-    if (!soundEnabled) return;
+  // Web Audio API Single Pop Chime (Throttled & Strictly Mute-Protected)
+  const playNotificationChime = useCallback((force = false) => {
+    // 1. Strict Mute Guard via ref (Always fresh, prevents stale closure audio playback)
+    if (!soundEnabledRef.current && !force) {
+      return;
+    }
+
+    // 2. Strict 3.0-Second Cooldown (Guarantees exactly 1 single pop sound, never repeats)
     const nowMs = Date.now();
-    if (nowMs - lastChimePlayedAtRef.current < 2500) {
-      return; // Prevent repetitive / overlapping chime sound
+    if (!force && nowMs - lastChimePlayedAtRef.current < 3000) {
+      return;
     }
     lastChimePlayedAtRef.current = nowMs;
 
@@ -293,42 +307,26 @@ export default function UnifiedInboxPage() {
 
       const now = ctx.currentTime;
 
-      // Note 1: Bright bell (587.33Hz D5 -> 880Hz A5)
-      const osc1 = ctx.createOscillator();
-      const gain1 = ctx.createGain();
-      osc1.type = "sine";
-      osc1.frequency.setValueAtTime(587.33, now);
-      osc1.frequency.exponentialRampToValueAtTime(880, now + 0.08);
+      // Clean, soft, single pop sound (523.25Hz C5 -> 783.99Hz G5)
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(523.25, now);
+      osc.frequency.exponentialRampToValueAtTime(783.99, now + 0.06);
 
-      gain1.gain.setValueAtTime(0, now);
-      gain1.gain.linearRampToValueAtTime(0.3, now + 0.02);
-      gain1.gain.exponentialRampToValueAtTime(0.001, now + 0.35);
+      gain.gain.setValueAtTime(0, now);
+      gain.gain.linearRampToValueAtTime(0.18, now + 0.015);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.22);
 
-      osc1.connect(gain1);
-      gain1.connect(ctx.destination);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
 
-      // Note 2: Warm harmonic pop (880Hz A5 -> 1174.66Hz D6)
-      const osc2 = ctx.createOscillator();
-      const gain2 = ctx.createGain();
-      osc2.type = "triangle";
-      osc2.frequency.setValueAtTime(880, now + 0.08);
-      osc2.frequency.exponentialRampToValueAtTime(1174.66, now + 0.2);
-
-      gain2.gain.setValueAtTime(0, now + 0.08);
-      gain2.gain.linearRampToValueAtTime(0.22, now + 0.1);
-      gain2.gain.exponentialRampToValueAtTime(0.001, now + 0.42);
-
-      osc2.connect(gain2);
-      gain2.connect(ctx.destination);
-
-      osc1.start(now);
-      osc1.stop(now + 0.36);
-      osc2.start(now + 0.08);
-      osc2.stop(now + 0.43);
+      osc.start(now);
+      osc.stop(now + 0.24);
     } catch {
       // AudioContext blocked or unsupported
     }
-  }, [soundEnabled]);
+  }, []);
 
   // Auto-dismiss toast notification after 6 seconds
   useEffect(() => {
@@ -777,10 +775,6 @@ export default function UnifiedInboxPage() {
             const lastIncoming = incoming[incoming.length - 1];
             if (lastIncoming?.sentAt) {
               lastKnownActiveMsgTimestampRef.current = lastIncoming.sentAt;
-            }
-
-            if (incoming.some((m) => m.direction === "INBOUND")) {
-              playNotificationChime();
             }
           }
         } else {
@@ -1631,10 +1625,16 @@ export default function UnifiedInboxPage() {
             type="button"
             onClick={() => {
               const next = !soundEnabled;
+              soundEnabledRef.current = next;
               setSoundEnabled(next);
-              if (next) playNotificationChime();
+              if (typeof window !== "undefined") {
+                localStorage.setItem("bizpilot_inbox_sound_enabled", String(next));
+              }
+              if (next) {
+                playNotificationChime(true); // Soft single preview when unmuting
+              }
             }}
-            title={soundEnabled ? "Chime sound is ON" : "Chime sound is MUTED"}
+            title={soundEnabled ? "Notification sound is ON (Click to Mute)" : "Notification sound is MUTED (Click to Enable)"}
             className={`p-2 rounded-lg border text-xs font-semibold flex items-center gap-1.5 transition-all ${
               soundEnabled
                 ? "bg-sky-50 text-sky-700 border-sky-200 hover:bg-sky-100 shadow-2xs"
